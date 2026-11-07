@@ -169,6 +169,41 @@ muse call <tool> [--json JSON]
 muse mcp
 ```
 
+## 新着の追跡（`history --follow`）
+
+`/chat/subscribe` は購読としては存在するが、実測では応答が返るまで 60 秒以上かかった。
+そのため `--follow` は履歴ポーリングで実装している。既存の最終 `seq` を起点に、
+新しいイベントだけを JSON Lines で 1 行ずつ出力する。
+
+```
+muse history --follow                     追跡開始（Ctrl+C まで）
+muse history --follow --until-idle 30     30秒無通信で自動終了
+muse history --follow --count 5           5件で終了
+muse history --follow --interval 5        ポーリング間隔（既定2秒）
+muse history --follow --thread lab --until-idle 10
+```
+
+出力はイベント1件1行なので、そのまま `jq` などへ渡せる。
+追跡開始・終了の通知は stderr に出るため、stdout は純粋なイベント列になる。
+
+## バイナリ応答の保存（`muse raw`）
+
+`/fs/export` は JSON ではなくバイナリを返す（実測では PDF）。`muse raw` はそうした
+経路を取得してファイルへ書き、内容を判定して報告する。
+
+```
+muse raw /fs/export --method POST --json-file body.json --out export.bin
+```
+
+判定は先頭バイトで行う（zip / pdf / png / jpeg / text / unknown）。
+サーバーが意図した型ではなく、実際のバイト列から判定した結果を返す。
+
+## 認証の自動回復
+
+ゲートウェイが 401（`hatchAdmissionInvalidated` / `session_invalid`）を返した場合、
+保存済みクッキーで `auth_check` を再実行して abra トークンを再発行し、元の要求を1回だけ再試行する。
+OTP の再入力は不要。回復に失敗したときは「`muse login` が必要」と明示して止まる。
+
 ## 応答待ちの仕組み
 
 `/chat/stream` は送信の受付 ACK（`message_id` と `session_id`）だけを返す。本文は履歴から取る。
@@ -185,7 +220,7 @@ muse mcp
 muse mcp
 ```
 
-stdio の JSON-RPC。ツールは 28 個。
+stdio の JSON-RPC。ツールは 34 個。
 
 | ツール | 内容 |
 |---|---|
@@ -195,6 +230,7 @@ stdio の JSON-RPC。ツールは 28 個。
 | `muse_threads` / `muse_thread` | サブチャットの一覧・作成・管理 |
 | `muse_exec` / `muse_sys` | VM 内シェル（エージェント経由） |
 | `muse_fs_list` / `muse_fs_stat` / `muse_fs_read` / `muse_fs_write` / `muse_fs_upload` / `muse_fs_delete` / `muse_fs_rename` | ワークスペース |
+| `muse_fs_search` / `muse_fs_library` / `muse_fs_mkdir` / `muse_fs_download` / `muse_fs_put` / `muse_raw` | 検索・ライブラリ・ディレクトリ・転送・バイナリ保存 |
 | `muse_goals` / `muse_session_action` / `muse_settings` | ゴール・セッション・設定 |
 | `muse_account_get` / `muse_account_post` | `/hatch/*` REST |
 | `muse_rpc` / `muse_web_api` | 汎用（破壊的操作は `confirm` 必須） |
