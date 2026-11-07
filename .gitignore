@@ -1,0 +1,12 @@
+# Private app artifact under analysis
+*.apk
+# Scratch work and generated analysis
+work/
+analysis/
+# Vendored reference tooling and third-party skills
+rea/
+.agents/
+# Host-specific MCP registration (contains absolute local paths)
+.dsh/
+# Workspace agent instructions
+AGENTS.md
