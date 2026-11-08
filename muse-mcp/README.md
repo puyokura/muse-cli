@@ -270,7 +270,7 @@ Windows と Linux の両方でビルド・実行を実測している。macOS �
 | 項目 | Windows | Linux |
 |---|---|---|
 | ビルド | `cargo build --release` | 同左（Debian 13 / rustc 1.99.1 で実測） |
-| テスト | 44 件 green | 44 件 green |
+| テスト | 52 件 green（Windows） | 52 件 green（Debian 13 / rustc 1.99.1） |
 | 状態ファイル | `%APPDATA%\muse-mcp\session.json` | `$XDG_CONFIG_HOME/muse-mcp/session.json`、無ければ `$HOME/.config/...` |
 | 状態の権限 | 既定の ACL | 0600（ファイル）と 0700（ディレクトリ） |
 | 保存方式 | 一時ファイル→rename | 同左 |
@@ -280,6 +280,12 @@ Windows と Linux の両方でビルド・実行を実測している。macOS �
 
 `MUSE_MCP_STATE` を指定した場合はそのパスをそのまま使う。`HOME` も `XDG_CONFIG_HOME` も無い
 環境では、ホーム直下を汚さないよう作業ディレクトリの `.muse-mcp-session.json` に置く。
+
+## 既知の挙動
+
+`muse chat` の応答取得は履歴ポーリングで、送信した `message_id` を起点に探す。
+送信メッセージが履歴の窓より古い場合は「まだ応答が無い」として待ち続け、
+別ターンの応答を返さない（実測で確認済みの回帰項目）。
 
 ## 制約
 

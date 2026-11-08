@@ -52,6 +52,127 @@ fn looks_like_auth_failure(err: &anyhow::Error) -> bool {
         || text.contains("Authentication Error")
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn event(role: &str, message_id: &str, text: &str, status: Option<&str>) -> Value {
+        let mut value = json!({
+            "event_name": format!("message.{}", role),
+            "message_id": message_id,
+            "display_text": text,
+        });
+        if let Some(status) = status {
+            value["status"] = json!(status);
+        }
+        value
+    }
+
+    #[test]
+    fn finds_the_reply_for_the_submitted_message() {
+        let history = json!({
+            "chat_events": [
+                event("user", "m1", "first", None),
+                event("assistant", "a1", "old answer", Some("completed")),
+                event("user", "m2", "second", None),
+                event("assistant", "a2", "new answer", Some("completed")),
+            ]
+        });
+        let (reply, _) = find_turn_reply(&history, Some("m2")).expect("reply");
+        assert_eq!(reply["display_text"], "new answer");
+    }
+
+    // Regression: a reply still streaming must not be accepted, otherwise the
+    // caller receives a truncated fragment.
+    #[test]
+    fn ignores_a_streaming_reply() {
+        let history = json!({
+            "chat_events": [
+                event("user", "m1", "prompt", None),
+                event("assistant", "a1", "```", Some("streaming")),
+            ]
+        });
+        assert!(find_turn_reply(&history, Some("m1")).is_none());
+    }
+
+    // Regression: when the submitted message is older than the history window,
+    // the newest assistant event belonged to the previous turn. Returning it
+    // produced a stale answer, so the poller must keep waiting instead.
+    #[test]
+    fn does_not_return_a_previous_turns_reply() {
+        let history = json!({
+            "chat_events": [
+                event("user", "old", "earlier prompt", None),
+                event("assistant", "a-old", "earlier answer", Some("completed")),
+            ]
+        });
+        assert!(find_turn_reply(&history, Some("m-new")).is_none());
+    }
+
+    #[test]
+    fn falls_back_to_newest_reply_without_a_message_id() {
+        let history = json!({
+            "chat_events": [
+                event("assistant", "a1", "one", Some("completed")),
+                event("assistant", "a2", "two", Some("completed")),
+            ]
+        });
+        let (reply, _) = find_turn_reply(&history, None).expect("reply");
+        assert_eq!(reply["display_text"], "two");
+    }
+
+    #[test]
+    fn auth_failure_detection_matches_measured_shapes() {
+        let unauthorized = anyhow!("Hatch RPC returned HTTP 401: Unauthorized");
+        assert!(looks_like_auth_failure(&unauthorized));
+        // `anyhow!` treats braces as format specifiers, so build it via Display.
+        let invalidated = anyhow::Error::msg(r#"{"type":"hatchAdmissionInvalidated"}"#);
+        assert!(looks_like_auth_failure(&invalidated));
+        let not_found = anyhow!("Hatch RPC returned HTTP 404: path not found");
+        assert!(!looks_like_auth_failure(&not_found));
+        let bad_request = anyhow!("HTTP 400: invalid_params");
+        assert!(!looks_like_auth_failure(&bad_request));
+    }
+
+    #[test]
+    fn envelope_unwrap_keeps_plain_payloads() {
+        let wrapped = json!({"ok": true, "result": {"sessions": []}});
+        assert_eq!(unwrap_envelope(wrapped).expect("unwrap")["sessions"], json!([]));
+
+        let plain = json!({"sessions": []});
+        assert_eq!(unwrap_envelope(plain).expect("plain")["sessions"], json!([]));
+
+        let failed = json!({"ok": false, "error": {"code": "x"}});
+        assert_eq!(unwrap_envelope(failed).expect("error")["ok"], json!(false));
+    }
+
+    #[test]
+    fn gateway_path_normalisation_rebases_absolute_paths() {
+        assert_eq!(normalize_gateway_path("AGENTS.md"), "AGENTS.md");
+        assert_eq!(normalize_gateway_path("/AGENTS.md"), "AGENTS.md");
+        // A leading `.` segment stays as-is; the gateway treats it as a name.
+        assert_eq!(normalize_gateway_path(r".\x\y"), "./x/y");
+        assert_eq!(
+            normalize_gateway_path("/workspace/notes/a.md"),
+            "workspace/notes/a.md"
+        );
+        assert_eq!(normalize_gateway_path("home/user/notes/a.md"), "notes/a.md");
+        assert_eq!(normalize_gateway_path("file:///x/y.txt"), "x/y.txt");
+        assert_eq!(normalize_gateway_path("a.txt?x=1#f"), "a.txt");
+        assert_eq!(normalize_gateway_path(""), "");
+    }
+
+    #[test]
+    fn base64_round_trip() {
+        let bytes = b"binary\x00payload";
+        let encoded = base64_encode(bytes);
+        let decoded = base64_decode(&encoded).expect("decode");
+        assert_eq!(decoded, bytes);
+        assert!(base64_decode("not base64!").is_err());
+    }
+
+}
+
 /// Text of the newest assistant event in a history payload, if any.
 fn newest_assistant_text(history: &Value) -> Option<String> {
     let event = newest_assistant_event(history)?;
@@ -165,15 +286,19 @@ fn find_turn_reply(history: &Value, sent_message_id: Option<&str>) -> Option<(Va
             event.get("message_id").and_then(Value::as_str) == Some(sent)
                 || event.get("reply_to_message_id").and_then(Value::as_str) == Some(sent)
         });
-        if let Some(index) = anchor {
-            let input = events[index].clone();
-            for event in events.iter().skip(index + 1) {
-                if is_ready(event) {
-                    return Some((event.clone(), input));
-                }
-            }
+        let Some(index) = anchor else {
+            // The submitted message is not in this window yet. Falling back to
+            // "the newest assistant reply" here returned the previous turn's
+            // answer, so report "not yet" and let the caller keep polling.
             return None;
+        };
+        let input = events[index].clone();
+        for event in events.iter().skip(index + 1) {
+            if is_ready(event) {
+                return Some((event.clone(), input));
+            }
         }
+        return None;
     }
 
     let reply = events.iter().rev().find(|event| is_ready(event))?;
