@@ -160,9 +160,19 @@ pub async fn resolve(client: &MuseClient, name: Option<&str>) -> Result<Resolved
     let id = thread_id(name);
     let sessions = parse_sessions(&client.sessions().await?);
     let row = sessions.into_iter().find(|entry| entry.session_id == id);
+    // Archived threads are absent from the default list, so an archived name
+    // looked "not created yet" and unarchive/delete could never reach it.
+    let archived = if row.is_none() {
+        parse_sessions(&client.archived_sessions().await?)
+            .into_iter()
+            .find(|entry| entry.session_id == id)
+    } else {
+        None
+    };
+    let exists = row.is_some() || archived.is_some();
     Ok(ResolvedThread {
-        exists: row.is_some(),
-        row,
+        exists,
+        row: row.or(archived),
         session_id: Some(id),
     })
 }
@@ -380,6 +390,21 @@ mod tests {
         assert_eq!(summary["counts"]["other"], 0);
         assert_eq!(summary["primary"][0]["session_id"], "p");
         assert_eq!(summary["threads"][0]["session_id"], "t");
+    }
+
+    // Regression: archived threads were absent from the default listing, so
+    // resolving them reported "not created yet" and unarchive/delete could
+    // never reach them.
+    #[test]
+    fn archived_rows_are_parsed_too() {
+        let payload = serde_json::json!({
+            "sessions": [
+                {"session_id": "gone", "title": "old", "is_thread": true, "archived": true, "updated_at_ms": 1}
+            ]
+        });
+        let rows = parse_sessions(&payload);
+        assert_eq!(rows.len(), 1);
+        assert!(rows[0].archived);
     }
 
     #[test]

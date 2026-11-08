@@ -325,6 +325,12 @@ impl MuseClient {
         self.rpc("GET", "/api/session/list", None).await
     }
 
+    /// Archived conversations. They are omitted from the default listing, so
+    /// resolving an archived thread needs this separate view.
+    pub async fn archived_sessions(&self) -> Result<Value> {
+        self.rpc("GET", "/api/session/list?view=archived", None).await
+    }
+
     pub async fn history(&self, session_id: Option<&str>, limit: u32) -> Result<Value> {
         let mut params = json!({ "limit": limit, "transcript_mode": "messages" });
         if let Some(session_id) = session_id {
@@ -777,7 +783,19 @@ fn load_or_create_device_id(state_path: &Path) -> String {
     }
     let id = uuid::Uuid::new_v4().to_string();
     if let Some(parent) = marker.parent() {
+        // The state file itself is 0600; the directory that holds it must not be
+        // world-traversable either, or the file mode is the only remaining
+        // barrier. 0700 is also what `$XDG_CONFIG_HOME` users expect.
         let _ = std::fs::create_dir_all(parent);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(meta) = std::fs::metadata(parent) {
+                let mut perms = meta.permissions();
+                perms.set_mode(0o700);
+                let _ = std::fs::set_permissions(parent, perms);
+            }
+        }
     }
     let _ = std::fs::write(&marker, serde_json::to_string_pretty(&json!({ "device_id": id })).unwrap_or_default());
     id

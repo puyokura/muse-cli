@@ -263,6 +263,24 @@ dsh への登録は `.dsh/cordis.patch.yml`。
 - 破壊的ガード（`rm`/`thread delete`/`rpc DELETE`）が `--confirm` 無しで停止すること
 - MCP の `initialize` / `tools/list` / `tools/call`
 
+## プラットフォーム
+
+Windows と Linux の両方でビルド・実行を実測している。macOS はソースが同じ経路を通るが未検証。
+
+| 項目 | Windows | Linux |
+|---|---|---|
+| ビルド | `cargo build --release` | 同左（Debian 13 / rustc 1.99.1 で実測） |
+| テスト | 44 件 green | 44 件 green |
+| 状態ファイル | `%APPDATA%\muse-mcp\session.json` | `$XDG_CONFIG_HOME/muse-mcp/session.json`、無ければ `$HOME/.config/...` |
+| 状態の権限 | 既定の ACL | 0600（ファイル）と 0700（ディレクトリ） |
+| 保存方式 | 一時ファイル→rename | 同左 |
+
+状態ファイルは所有者だけが読める権限で、書き込みは一時ファイル経由の rename で行う。
+中断してもセッションが半端な JSON で壊れない。
+
+`MUSE_MCP_STATE` を指定した場合はそのパスをそのまま使う。`HOME` も `XDG_CONFIG_HOME` も無い
+環境では、ホーム直下を汚さないよう作業ディレクトリの `.muse-mcp-session.json` に置く。
+
 ## 制約
 
 - Muse の非公開プロトコルに依存する。上流の変更で壊れうる

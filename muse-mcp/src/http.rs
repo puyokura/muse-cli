@@ -84,23 +84,36 @@ impl SessionState {
             std::fs::create_dir_all(parent)?;
         }
         let raw = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, raw)?;
-        restrict_permissions(path)?;
+        // Write to a sibling temp file and rename: an interrupted write must not
+        // leave a half-serialized session, and the temp file is created with
+        // restrictive permissions before any credential bytes land in it.
+        let temp = path.with_extension("json.tmp");
+        write_private(&temp, &raw)?;
+        std::fs::rename(&temp, path)
+            .map_err(|err| anyhow!("cannot replace {}: {err}", path.display()))?;
         Ok(())
     }
 }
 
+/// Create `path` with owner-only permissions, then write the bytes.
 #[cfg(unix)]
-fn restrict_permissions(path: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = std::fs::metadata(path)?.permissions();
-    perms.set_mode(0o600);
-    std::fs::set_permissions(path, perms)?;
+fn write_private(path: &Path, contents: &str) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    file.write_all(contents.as_bytes())?;
+    file.sync_all()?;
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn restrict_permissions(_path: &Path) -> Result<()> {
+fn write_private(path: &Path, contents: &str) -> Result<()> {
+    std::fs::write(path, contents)?;
     Ok(())
 }
 
