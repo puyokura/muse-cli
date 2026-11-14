@@ -448,6 +448,16 @@ impl HatchConnection {
         self.streams.lock().await.clear();
     }
 
+    /// Why this socket died, if it did.
+    ///
+    /// A connection object outlives its socket: the reader task records a
+    /// reason here and every later request fails with "connection is closed".
+    /// Callers must consult this before reusing a cached connection, or the
+    /// process keeps replaying a dead socket forever.
+    pub async fn closed_reason(&self) -> Option<String> {
+        self.closed.lock().await.clone()
+    }
+
 }
 
 fn encode_request(

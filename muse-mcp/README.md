@@ -205,6 +205,27 @@ muse raw /fs/export --method POST --json-file body.json --out export.bin
 保存済みクッキーで `auth_check` を再実行して abra トークンを再発行し、元の要求を1回だけ再試行する。
 OTP の再入力は不要。回復に失敗したときは「`muse login` が必要」と明示して止まる。
 
+## 切断からの復帰
+
+ゲートウェイとの Noise ソケットは落ちる。落ちた原因は接続オブジェクトに記録され、
+以降の要求はすべて `Hatch connection is closed` で失敗する。
+
+以前はこの死んだハンドルをキャッシュから出し続けたため、**一度切れるとプロセスが
+終わるまで全ツールが失敗した**。`muse_status` だけが通るのは、これがゲートウェイを
+経由せずトークン検証 API を直接叩くためで、「生きている」証拠にならない。
+
+現在は3段で復帰する。
+
+1. `connect` は再利用前に閉鎖理由を見る。記録があれば捨てて新しく張る
+2. RPC は死んだソケットのエラーを受けたら1回だけ張り直す（上限あり、無限再試行にしない）
+3. WebSocket 接続は全候補を1巡したあと2秒待って、もう1巡する
+
+3 は実測に基づく。同じ共有 ingress が一度は接続を拒否し、5秒後に受け入れた例があった。
+呼び出し側には「一過性の失敗」と「VM が落ちている」を区別する手段が無いため、
+1回だけやり直す。
+
+復旧の判定は `muse_ping` で行う。`muse_status` はゲートウェイを通らないので使えない。
+
 ## 応答待ちの仕組み
 
 `/chat/stream` は送信の受付 ACK（`message_id` と `session_id`）だけを返す。本文は履歴から取る。
@@ -312,7 +333,7 @@ Windows と Linux の両方でビルド・実行を実測している。macOS �
 | 項目 | Windows | Linux |
 |---|---|---|
 | ビルド | `cargo build --release` | 同左（Debian 13 / rustc 1.99.1 で実測） |
-| テスト | 65 件 green（Windows） | 65 件 green（Debian 13 / rustc 1.99.1、relay 追加前） |
+| テスト | 68 件 green（Windows） | 68 件 green（Debian 13 / rustc 1.99.1） |
 | 状態ファイル | `%APPDATA%\muse-mcp\session.json` | `$XDG_CONFIG_HOME/muse-mcp/session.json`、無ければ `$HOME/.config/...` |
 | 状態の権限 | 既定の ACL | 0600（ファイル）と 0700（ディレクトリ） |
 | 保存方式 | 一時ファイル→rename | 同左 |

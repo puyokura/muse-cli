@@ -41,6 +41,32 @@ fn unwrap_envelope(value: Value) -> Result<Value> {
     }
 }
 
+/// How many dials one RPC may spend before the failure is surfaced.
+///
+/// One extra dial covers the window between "connect" and the request being
+/// written. More than that would spin when the gateway is refusing dials.
+pub(crate) const RECONNECT_ATTEMPTS: usize = 2;
+
+/// Whether an error means the socket died rather than the route failing.
+fn looks_like_a_dead_socket(err: &anyhow::Error) -> bool {
+    let text = format!("{err:#}");
+    text.contains("Hatch connection is closed")
+        || text.contains("Hatch connection closed")
+        || text.contains("Connection reset without closing handshake")
+        || text.contains("Hatch stream ended without a response")
+        || text.contains("Hatch writer task is not running")
+}
+
+/// Whether a cached connection may serve another request.
+///
+/// A `HatchConnection` outlives its socket. When the reader task records a
+/// closure the object stays in the cache but every request on it fails, so
+/// reusing it turns one dropped socket into permanent failure for the rest of
+/// the process. Anything with a recorded reason must be dialled again.
+pub(crate) fn is_reusable(closed_reason: Option<&str>) -> bool {
+    closed_reason.is_none()
+}
+
 /// Whether an error means "the gateway rejected our credential" rather than
 /// "this route failed". Matches the measured shapes (HTTP 401 and the
 /// `hatchAdmissionInvalidated` / `session_invalid` codes) without swallowing
@@ -120,6 +146,42 @@ mod tests {
         });
         let (reply, _) = find_turn_reply(&history, None).expect("reply");
         assert_eq!(reply["display_text"], "two");
+    }
+
+    // Regression: a closed connection used to be cached and handed out again,
+    // so every later call in the process failed with "connection is closed"
+    // even though a fresh dial would have worked.
+    #[test]
+    fn a_closed_connection_is_not_reusable() {
+        assert!(is_reusable(None), "a live socket can serve another request");
+        assert!(
+            !is_reusable(Some(
+                "WebSocket protocol error: Connection reset without closing handshake"
+            )),
+            "a socket that died must be dialled again"
+        );
+        assert!(!is_reusable(Some("any other reason")));
+    }
+
+    // A closed handle must be replaced, and the replacement must not loop.
+    #[test]
+    fn reconnect_is_bounded() {
+        assert!(RECONNECT_ATTEMPTS >= 1, "at least one fresh dial is needed");
+        assert!(RECONNECT_ATTEMPTS <= 3, "more than three dials is a spin");
+    }
+
+    #[test]
+    fn dead_socket_detection_matches_measured_shapes() {
+        let closed = anyhow::Error::msg(
+            "Hatch connection is closed: WebSocket protocol error: Connection reset without closing handshake",
+        );
+        assert!(looks_like_a_dead_socket(&closed));
+        let mid = anyhow::Error::msg("Hatch connection closed during GET /api/identity: done");
+        assert!(looks_like_a_dead_socket(&mid));
+        let timeout = anyhow::Error::msg("Hatch RPC GET /x timed out after 30s");
+        assert!(!looks_like_a_dead_socket(&timeout));
+        let not_found = anyhow::Error::msg("Hatch RPC returned HTTP 404: path not found");
+        assert!(!looks_like_a_dead_socket(&not_found));
     }
 
     #[test]
@@ -328,9 +390,23 @@ impl MuseClient {
     }
 
     /// Open (or reuse) the Noise connection.
+    ///
+    /// A cached connection is only reusable while its socket is alive. Once the
+    /// reader task records a closure, every request against it fails with
+    /// "connection is closed" and never recovers, because nothing reconnects:
+    /// the reuse check has to throw the dead handle away and dial again.
     pub async fn connect(&self) -> Result<Arc<HatchConnection>> {
-        if let Some(existing) = self.connection.lock().await.as_ref() {
-            return Ok(existing.clone());
+        if let Some(existing) = self.connection.lock().await.clone() {
+            if is_reusable(existing.closed_reason().await.as_deref()) {
+                return Ok(existing);
+            }
+            // Dead socket: drop it and fall through to a fresh dial.
+            tracing::info!(
+                target: "muse_mcp::noise",
+                reason = ?existing.closed_reason().await,
+                "dropping a closed Hatch connection and reconnecting"
+            );
+            self.connection.lock().await.take();
         }
         let mut http = self.http.lock().await;
         let bootstrap = http.bootstrap().await?;
@@ -338,16 +414,26 @@ impl MuseClient {
         let candidates = bootstrap.websocket_candidates();
         drop(http);
 
+        // Dial every candidate, then once more after a short pause. A dial can
+        // fail transiently (measured: the same shared ingress refused, then
+        // accepted five seconds later), and a caller has no way to tell that
+        // apart from "the VM is down".
         let mut failures: Vec<String> = Vec::new();
-        for url in candidates {
-            match HatchConnection::connect(&url, &bootstrap.locale).await {
-                Ok(connection) => {
-                    let connection = Arc::new(connection);
-                    *self.bootstrap.lock().await = Some(bootstrap);
-                    *self.connection.lock().await = Some(connection.clone());
-                    return Ok(connection);
+        for round in 0..2 {
+            if round > 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                failures.clear();
+            }
+            for url in &candidates {
+                match HatchConnection::connect(url, &bootstrap.locale).await {
+                    Ok(connection) => {
+                        let connection = Arc::new(connection);
+                        *self.bootstrap.lock().await = Some(bootstrap);
+                        *self.connection.lock().await = Some(connection.clone());
+                        return Ok(connection);
+                    }
+                    Err(err) => failures.push(format!("{err}")),
                 }
-                Err(err) => failures.push(format!("{err}")),
             }
         }
         bail!("no Hatch gateway accepted the connection: {}", failures.join(" | "))
@@ -365,39 +451,68 @@ impl MuseClient {
         path: &str,
         params: Option<Value>,
     ) -> Result<Value> {
-        match self.rpc_once(method, path, params.clone()).await {
-            Ok(value) => Ok(value),
-            Err(err) if looks_like_auth_failure(&err) => {
-                // A cached abra token expires while the browser cookies stay
-                // valid. Re-running auth_check re-issues it without another OTP,
-                // so the caller only sees the retry when that fails too.
-                let recovered = {
-                    let mut http = self.http.lock().await;
-                    http.auth_check().await.map(|check| {
-                        check
-                            .get("ok")
-                            .and_then(Value::as_bool)
-                            .unwrap_or(false)
-                    })
-                };
-                match recovered {
-                    Ok(true) => {
-                        tracing::info!(
-                            target: "muse_mcp::auth",
-                            "recovered an expired gateway credential via auth_check"
-                        );
-                        self.disconnect().await;
-                        self.rpc_once(method, path, params).await
-                    }
-                    Ok(false) => Err(err.context(
-                        "401 and the stored session no longer validates; run `muse login`",
-                    )),
-                    Err(recover_err) => Err(err.context(format!(
-                        "401 and the credential refresh failed: {recover_err}"
-                    ))),
+        // A socket can die between "connect" and the request being written.
+        // `connect` already replaces a handle it knows is closed, but the
+        // closure can land afterwards, so one fresh dial covers the remaining
+        // window. The budget stays at one to avoid spinning.
+        let mut attempt = 0usize;
+        loop {
+            attempt += 1;
+            match self.rpc_once(method, path, params.clone()).await {
+                Ok(value) => return Ok(value),
+                Err(err)
+                    if looks_like_a_dead_socket(&err) && attempt < RECONNECT_ATTEMPTS =>
+                {
+                    tracing::info!(
+                        target: "muse_mcp::noise",
+                        path,
+                        attempt,
+                        "socket died mid-request; dialling again"
+                    );
+                    self.disconnect().await;
                 }
+                Err(err) => return self.recover_and_retry(err, method, path, params).await,
             }
-            Err(err) => Err(err),
+        }
+    }
+
+    /// Handle a failure the retry loop gave up on: refresh a credential, or
+    /// surface the error unchanged.
+    async fn recover_and_retry(
+        &self,
+        err: anyhow::Error,
+        method: &str,
+        path: &str,
+        params: Option<Value>,
+    ) -> Result<Value> {
+        if !looks_like_auth_failure(&err) {
+            return Err(err);
+        }
+        // A cached abra token expires while the browser cookies stay valid.
+        // Re-running auth_check re-issues it without another OTP, so the caller
+        // only sees the retry when that fails too.
+        let recovered = {
+            let mut http = self.http.lock().await;
+            http.auth_check().await.map(|check| {
+                check
+                    .get("ok")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            })
+        };
+        match recovered {
+            Ok(true) => {
+                tracing::info!(
+                    target: "muse_mcp::auth",
+                    "recovered an expired gateway credential via auth_check"
+                );
+                self.disconnect().await;
+                self.rpc_once(method, path, params).await
+            }
+            Ok(false) => Err(err
+                .context("401 and the stored session no longer validates; run `muse login`")),
+            Err(recover_err) => Err(err
+                .context(format!("401 and the credential refresh failed: {recover_err}"))),
         }
     }
 
@@ -564,6 +679,15 @@ impl MuseClient {
         let events = self
             .ask_with_headers(prompt, session_id, attachments, reply_timeout, extra)
             .await?;
+        // A submission that produced no acknowledgement never reached the
+        // gateway. Reporting "no reply" for it would read as "the agent stayed
+        // silent", which is a different fact and the wrong one to hand back.
+        if events.is_empty() {
+            bail!(
+                "the gateway returned no acknowledgement for the submission; the prompt was \
+                 not confirmed as delivered"
+            );
+        }
         let ack = events.first().cloned().unwrap_or(Value::Null);
         let session_id = ack
             .get("session_id")
