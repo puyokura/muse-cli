@@ -13,6 +13,7 @@ mod client;
 mod http;
 mod mcp;
 mod noise;
+mod relay;
 mod sysfs;
 mod thread;
 mod tools;
@@ -94,6 +95,7 @@ async fn run() -> Result<()> {
         "threads" => cmd_threads(&client, &args).await,
         "thread" => cmd_thread(&client, &args).await,
         "chat" | "ask" => cmd_chat(&client, &args).await,
+        "relay" => cmd_relay(&client, &args).await,
         "history" => cmd_history(&client, &args).await,
         "cancel" => cmd_cancel(&client, &args).await,
         "exec" | "run" => cmd_exec(&client, &args).await,
@@ -121,6 +123,7 @@ USAGE
 CHAT
   muse chat [prompt...]              Send a prompt and print the reply
   muse chat --thread <name> [...]    Run inside a named sub-chat
+  muse relay <prompt...>             Send with DSH<->Muse correlation headers
   muse ask <prompt...>               Alias of chat
   muse threads [--all]               List primary chat and sub-chats
   muse thread new <name> [prompt...] Create a sub-chat
@@ -156,6 +159,13 @@ LOW LEVEL
   muse login <contact> [region]     Interactive OTP login
   muse login --start <contact>      Send OTP only
   muse login --finish <code>        Complete OTP
+
+RELAY HEADERS
+  --muse-session ID   Muse conversation the prompt is delivered to
+  --dsh-session ID    DSH session that issued this turn
+  --request-id ID     Correlation id for this single turn
+  Env fallback: MUSE_SESSION_ID / DSH_SESSION_ID / REQUEST_ID (flags win).
+  Values must be non-empty, <= 256 chars, and free of control characters.
 
 JSON INPUT
   --set key=value        First choice: no quote characters, so no shell can
@@ -525,6 +535,98 @@ async fn cmd_chat(client: &Arc<MuseClient>, args: &Args) -> Result<()> {
         }))
     );
     Ok(())
+}
+
+/// Send one prompt to Muse with the relay correlation headers attached and
+/// wait for the reply.
+///
+/// This is the dedicated entry point for DSH <-> Muse turns: it always sends
+/// `museSessionId`, `dshSessionId`, and `requestId` (by flag or environment) and
+/// reports the triple back so the caller can log it against its own transcript.
+async fn cmd_relay(client: &Arc<MuseClient>, args: &Args) -> Result<()> {
+    let prompt = args
+        .rest_joined(1)
+        .filter(|text| !text.trim().is_empty())
+        .ok_or_else(|| anyhow!("muse relay needs a prompt"))?;
+
+    let relay = relay_headers(args)?;
+    if relay.is_empty() {
+        bail!(
+            "muse relay needs at least one correlation id: pass --muse-session, \
+             --dsh-session, or --request-id (or set MUSE_SESSION_ID / DSH_SESSION_ID / REQUEST_ID)"
+        );
+    }
+    // A relay turn targets the Muse session named on the header unless the
+    // caller also names a thread; the two must agree, or the header would point
+    // at one conversation while the prompt lands in another.
+    let (thread_session, name) = resolve_thread(client, args).await?;
+    if let (Some(header_session), Some(thread_session)) =
+        (&relay.muse_session_id, &thread_session)
+    {
+        if header_session != thread_session {
+            bail!(
+                "--muse-session ({header_session}) and the resolved thread ({thread_session}) point at different conversations"
+            );
+        }
+    }
+    let session_id = thread_session.or_else(|| relay.muse_session_id.clone());
+
+    let images: Vec<PathBuf> = args
+        .flag_all("image")
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    let headers = relay.to_headers()?;
+    let started = std::time::Instant::now();
+
+    let outcome = client
+        .ask_and_wait_with_headers(
+            &prompt,
+            session_id.as_deref(),
+            &images,
+            reply_timeout(args)?,
+            Duration::from_secs(args.flag_u64("poll")?.unwrap_or(2).max(1)),
+            &headers,
+        )
+        .await?;
+
+    let text = outcome
+        .reply
+        .get("display_text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    println!(
+        "{}",
+        cli::render(&json!({
+            "relay": relay.to_json(),
+            "session_id": outcome.session_id,
+            "sent_message_id": outcome.sent_message_id,
+            "replied": !text.is_empty(),
+            "text": text,
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+            "thread": name,
+        }))
+    );
+    Ok(())
+}
+
+/// Relay ids from flags, falling back to environment variables.
+///
+/// Environment fallback exists so a DSH turn can export its session id once and
+/// not repeat it on every call.
+fn relay_headers(args: &Args) -> Result<relay::RelayHeaders> {
+    let pick = |flag: &str, env: &str| -> Option<String> {
+        args.flag(flag)
+            .map(str::to_string)
+            .or_else(|| std::env::var(env).ok())
+            .filter(|value| !value.trim().is_empty())
+    };
+    Ok(relay::RelayHeaders {
+        muse_session_id: pick("muse-session", "MUSE_SESSION_ID"),
+        dsh_session_id: pick("dsh-session", "DSH_SESSION_ID"),
+        request_id: pick("request-id", "REQUEST_ID"),
+    })
 }
 
 async fn cmd_history(client: &Arc<MuseClient>, args: &Args) -> Result<()> {

@@ -163,6 +163,7 @@ muse settings read
 muse settings set-voice <voice-id>
 muse goals list|get|create|update|delete
 muse web <METHOD> /api/... [--json JSON] [--csrf]
+muse relay <prompt> --muse-session <id> --dsh-session <id> --request-id <id>
 muse rpc <METHOD> <path> [--set k=v]... [--json-file F] [--confirm]
 muse tools
 muse call <tool> [--json JSON]
@@ -220,7 +221,7 @@ OTP の再入力は不要。回復に失敗したときは「`muse login` が必
 muse mcp
 ```
 
-stdio の JSON-RPC。ツールは 34 個。
+stdio の JSON-RPC。ツールは 35 個。
 
 | ツール | 内容 |
 |---|---|
@@ -263,6 +264,47 @@ dsh への登録は `.dsh/cordis.patch.yml`。
 - 破壊的ガード（`rm`/`thread delete`/`rpc DELETE`）が `--confirm` 無しで停止すること
 - MCP の `initialize` / `tools/list` / `tools/call`
 
+## DSH との対話（muse-relay）
+
+DSH と Muse を往復させるための専用経路。通常の `/chat/stream` に3つのヘッダを載せて送る。
+
+| ヘッダ | 意味 |
+|---|---|
+| `museSessionId` | プロンプトを届ける Muse の会話 |
+| `dshSessionId` | 送信元の DSH セッション |
+| `requestId` | この1ターンの相関 ID |
+
+`requestId` はトランスポートが使う `x-request-id` にも流用する。1ターンに1つの ID が、
+ゲートウェイと Muse 側の両方で同じ値になる。
+
+```
+muse relay "本文" \
+  --muse-session eeb1c4d1-8927-84dd-8037-9a23d2e2b2f0 \
+  --dsh-session ac5f1193-2a35-4be1-9b1c-485620007002 \
+  --request-id lfm3-a1b-v2-layeralloc-20261114-ac5f1193-1
+```
+
+同じ値は環境変数 `MUSE_SESSION_ID` / `DSH_SESSION_ID` / `REQUEST_ID` でも渡せる。
+毎ターン同じ DSH セッション ID を書きたくない場合に使う。フラグが優先。
+
+MCP では `muse_relay` ツールが同じことをする。
+
+```
+muse_relay(prompt, muse_session_id, dsh_session_id, request_id, reply_timeout_sec)
+```
+
+応答は完了まで待って本文を返す。返り値には相関 ID の組、`sent_message_id`、
+`replied`、`text`、`elapsed_ms` が入る。呼び出し側はこの組を自分の記録に残せる。
+
+ID の検証は送信前に行う。CR・LF・NUL・その他の制御文字を含む値、空の値、
+256文字を超える値は拒否する。ヘッダ分割を狙った入力が届く前に止まる。
+
+`--thread` と `--muse-session` を同時に指定した場合、両者が同じ会話を指すことを確認する。
+食い違えば、ヘッダが別の会話を指したままプロンプトが届くのを避けるため停止する。
+
+`requestId` がゲートウェイの会話履歴には残らないことを実測した。履歴の `chat_events` に
+この文字列は現れない。相関は呼び出し側の記録と、返ってきた `sent_message_id` で取る。
+
 ## プラットフォーム
 
 Windows と Linux の両方でビルド・実行を実測している。macOS はソースが同じ経路を通るが未検証。
@@ -270,7 +312,7 @@ Windows と Linux の両方でビルド・実行を実測している。macOS �
 | 項目 | Windows | Linux |
 |---|---|---|
 | ビルド | `cargo build --release` | 同左（Debian 13 / rustc 1.99.1 で実測） |
-| テスト | 52 件 green（Windows） | 52 件 green（Debian 13 / rustc 1.99.1） |
+| テスト | 65 件 green（Windows） | 65 件 green（Debian 13 / rustc 1.99.1、relay 追加前） |
 | 状態ファイル | `%APPDATA%\muse-mcp\session.json` | `$XDG_CONFIG_HOME/muse-mcp/session.json`、無ければ `$HOME/.config/...` |
 | 状態の権限 | 既定の ACL | 0600（ファイル）と 0700（ディレクトリ） |
 | 保存方式 | 一時ファイル→rename | 同左 |

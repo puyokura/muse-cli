@@ -7,6 +7,7 @@
 
 use crate::http::{Bootstrap, MuseHttp};
 use crate::transport::HatchConnection;
+use crate::wire::Header;
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
@@ -491,6 +492,20 @@ impl MuseClient {
         attachments: &[PathBuf],
         idle_timeout: std::time::Duration,
     ) -> Result<Vec<Value>> {
+        self.ask_with_headers(prompt, session_id, attachments, idle_timeout, &[])
+            .await
+    }
+
+    /// Same as [`Self::ask`] with caller-supplied headers on the wire. Used for
+    /// relay turns, where the correlation ids must reach the gateway.
+    pub async fn ask_with_headers(
+        &self,
+        prompt: &str,
+        session_id: Option<&str>,
+        attachments: &[PathBuf],
+        idle_timeout: std::time::Duration,
+        extra: &[Header],
+    ) -> Result<Vec<Value>> {
         if prompt.trim().is_empty() {
             bail!("prompt must not be empty");
         }
@@ -510,7 +525,7 @@ impl MuseClient {
             payload["session_id"] = json!(session_id);
         }
         connection
-            .stream_events("/chat/stream", payload, idle_timeout, 4000)
+            .stream_events("/chat/stream", payload, idle_timeout, 4000, extra)
             .await
     }
 
@@ -525,7 +540,30 @@ impl MuseClient {
         reply_timeout: std::time::Duration,
         poll_interval: std::time::Duration,
     ) -> Result<AskOutcome> {
-        let events = self.ask(prompt, session_id, attachments, reply_timeout).await?;
+        self.ask_and_wait_with_headers(
+            prompt,
+            session_id,
+            attachments,
+            reply_timeout,
+            poll_interval,
+            &[],
+        )
+        .await
+    }
+
+    /// Same as [`Self::ask_and_wait`] with caller-supplied headers on the wire.
+    pub async fn ask_and_wait_with_headers(
+        &self,
+        prompt: &str,
+        session_id: Option<&str>,
+        attachments: &[PathBuf],
+        reply_timeout: std::time::Duration,
+        poll_interval: std::time::Duration,
+        extra: &[Header],
+    ) -> Result<AskOutcome> {
+        let events = self
+            .ask_with_headers(prompt, session_id, attachments, reply_timeout, extra)
+            .await?;
         let ack = events.first().cloned().unwrap_or(Value::Null);
         let session_id = ack
             .get("session_id")

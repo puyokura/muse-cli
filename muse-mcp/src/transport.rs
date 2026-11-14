@@ -238,15 +238,8 @@ impl HatchConnection {
         })
     }
 
-    fn headers(&self, json_body: bool) -> Vec<Header> {
-        let mut headers = Vec::new();
-        if json_body {
-            headers.push(Header::new("Content-Type", "application/json"));
-        }
-        headers.push(Header::new("x-request-id", &uuid::Uuid::new_v4().to_string()));
-        headers.push(Header::new("x-app-id", "hatch-web"));
-        headers.push(Header::new("Accept-Language", &self.locale));
-        headers
+    fn headers(&self, json_body: bool, extra: &[Header]) -> Vec<Header> {
+        merge_headers(json_body, &self.locale, extra)
     }
 
     async fn open_stream(
@@ -256,6 +249,7 @@ impl HatchConnection {
         body: Vec<u8>,
         json_body: bool,
         service: u64,
+        extra: &[Header],
     ) -> Result<(i64, mpsc::UnboundedReceiver<Incoming>)> {
         if let Some(reason) = self.closed.lock().await.clone() {
             bail!("Hatch connection is closed: {reason}");
@@ -264,7 +258,7 @@ impl HatchConnection {
         let request = ApplicationRequest {
             verb: method.to_string(),
             path: path.to_string(),
-            headers: self.headers(json_body),
+            headers: self.headers(json_body, extra),
             body,
             end_body: true,
         };
@@ -288,9 +282,23 @@ impl HatchConnection {
         service: u64,
         timeout: std::time::Duration,
     ) -> Result<RpcResponse> {
+        self.request_with_headers(method, path, params, service, timeout, &[])
+            .await
+    }
+
+    /// Same as [`Self::request`] with caller-supplied headers on the wire.
+    pub async fn request_with_headers(
+        &self,
+        method: &str,
+        path: &str,
+        params: Option<serde_json::Value>,
+        service: u64,
+        timeout: std::time::Duration,
+        extra: &[Header],
+    ) -> Result<RpcResponse> {
         let (path, body, json_body) = encode_request(method, path, params)?;
         let (stream_id, mut receiver) =
-            self.open_stream(method, &path, body, json_body, service).await?;
+            self.open_stream(method, &path, body, json_body, service, extra).await?;
 
         let result = tokio::time::timeout(timeout, async {
             let mut status = 0u32;
@@ -356,17 +364,18 @@ impl HatchConnection {
 
 
     /// POST a streaming endpoint and collect newline-delimited JSON events until
-    /// the deadline or `max_events`.
+    /// the deadline or `max_events`. `extra` carries caller headers onto the wire.
     pub async fn stream_events(
         &self,
         path: &str,
         params: serde_json::Value,
         idle_timeout: std::time::Duration,
         max_events: usize,
+        extra: &[Header],
     ) -> Result<Vec<serde_json::Value>> {
         let (path, body, json_body) = encode_request("POST", path, Some(params))?;
         let (stream_id, mut receiver) =
-            self.open_stream("POST", &path, body, json_body, SERVICE_DAEMON).await?;
+            self.open_stream("POST", &path, body, json_body, SERVICE_DAEMON, extra).await?;
         let mut buffer: Vec<u8> = Vec::new();
         let mut events = Vec::new();
 
@@ -505,4 +514,127 @@ fn redact_url(url: &str) -> String {
     }
     parsed.set_query(None);
     parsed.to_string()
+}
+
+/// Build the header list for one request.
+///
+/// Baseline headers first, then the caller's. A caller-supplied `x-request-id`
+/// replaces the generated one so a correlation id stays identical everywhere it
+/// is visible instead of appearing as two unrelated ids.
+pub(crate) fn merge_headers(json_body: bool, locale: &str, extra: &[Header]) -> Vec<Header> {
+    let mut headers = Vec::new();
+    if json_body {
+        headers.push(Header::new("Content-Type", "application/json"));
+    }
+    let request_id = extra
+        .iter()
+        .find(|header| header.key.eq_ignore_ascii_case("x-request-id"))
+        .map(|header| header.value.clone())
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    headers.push(Header::new("x-request-id", &request_id));
+    headers.push(Header::new("x-app-id", "hatch-web"));
+    headers.push(Header::new("Accept-Language", locale));
+    for header in extra {
+        if header.key.eq_ignore_ascii_case("x-request-id") {
+            continue;
+        }
+        headers.push(header.clone());
+    }
+    headers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wire::fields;
+
+    fn relay_headers_wire() -> Vec<Header> {
+        vec![
+            Header::new("museSessionId", "eeb1c4d1-8927-84dd-8037-9a23d2e2b2f0"),
+            Header::new("dshSessionId", "ac5f1193-2a35-4be1-9b1c-485620007002"),
+            Header::new("requestId", "lfm3-a1b-v2-layeralloc-20261114-ac5f1193-1"),
+        ]
+    }
+
+    #[test]
+    fn baseline_headers_are_always_present() {
+        let headers = merge_headers(true, "ja", &[]);
+        let keys: Vec<&str> = headers.iter().map(|h| h.key.as_str()).collect();
+        assert!(keys.contains(&"Content-Type"));
+        assert!(keys.contains(&"x-request-id"));
+        assert!(keys.contains(&"x-app-id"));
+        assert!(keys.contains(&"Accept-Language"));
+    }
+
+    #[test]
+    fn caller_headers_are_appended() {
+        let headers = merge_headers(true, "ja", &relay_headers_wire());
+        let keys: Vec<&str> = headers.iter().map(|h| h.key.as_str()).collect();
+        assert!(keys.contains(&"museSessionId"));
+        assert!(keys.contains(&"dshSessionId"));
+        assert!(keys.contains(&"requestId"));
+    }
+
+    #[test]
+    fn caller_request_id_replaces_the_generated_one() {
+        let extra = vec![Header::new("x-request-id", "fixed-id")];
+        let headers = merge_headers(true, "ja", &extra);
+        let ids: Vec<&str> = headers
+            .iter()
+            .filter(|h| h.key.eq_ignore_ascii_case("x-request-id"))
+            .map(|h| h.value.as_str())
+            .collect();
+        assert_eq!(ids, vec!["fixed-id"], "exactly one request id");
+    }
+
+    // The relay headers have to survive protobuf encoding, not just exist in a
+    // Vec. This asserts on the bytes that actually go on the wire.
+    #[test]
+    fn relay_headers_survive_encoding() {
+        let headers = merge_headers(
+            true,
+            "ja",
+            &[
+                Header::new("museSessionId", "eeb1c4d1-8927-84dd-8037-9a23d2e2b2f0"),
+                Header::new("dshSessionId", "ac5f1193-2a35-4be1-9b1c-485620007002"),
+                Header::new("requestId", "relay-1"),
+            ],
+        );
+        let request = ApplicationRequest {
+            verb: "POST".to_string(),
+            path: "/chat/stream".to_string(),
+            headers,
+            body: b"{}".to_vec(),
+            end_body: true,
+        };
+        let encoded = request.encode();
+        let text = String::from_utf8_lossy(&encoded);
+
+        assert!(text.contains("museSessionId"));
+        assert!(text.contains("eeb1c4d1-8927-84dd-8037-9a23d2e2b2f0"));
+        assert!(text.contains("dshSessionId"));
+        assert!(text.contains("ac5f1193-2a35-4be1-9b1c-485620007002"));
+        assert!(text.contains("requestId"));
+        assert!(text.contains("relay-1"));
+    }
+
+    #[test]
+    fn encoded_header_count_matches_the_list() {
+        let headers = merge_headers(true, "ja", &relay_headers_wire());
+        let expected = headers.len();
+        let request = ApplicationRequest {
+            verb: "POST".to_string(),
+            path: "/chat/stream".to_string(),
+            headers,
+            body: Vec::new(),
+            end_body: true,
+        };
+        let encoded = request.encode();
+        let decoded = fields(&encoded).expect("parse");
+        let header_count = decoded
+            .iter()
+            .filter(|(field, _)| *field == 3)
+            .count();
+        assert_eq!(header_count, expected);
+    }
 }

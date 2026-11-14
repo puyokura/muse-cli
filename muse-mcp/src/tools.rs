@@ -94,6 +94,27 @@ pub fn definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "muse_relay",
+            "description": "Send one prompt to Muse with DSH<->Muse correlation headers (museSessionId, dshSessionId, requestId) on the wire and wait for the reply. Use this for agent-to-agent turns so each turn can be matched to the session pair that produced it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "prompt": { "type": "string", "description": "Message to deliver to the Muse agent" },
+                    "muse_session_id": { "type": "string", "description": "Muse conversation the prompt is delivered to; also used as the session_id when set" },
+                    "dsh_session_id": { "type": "string", "description": "DSH session that issued this turn" },
+                    "request_id": { "type": "string", "description": "Correlation id for this single turn" },
+                    "attachments": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Absolute paths to PNG/JPEG/WebP/GIF files to attach"
+                    },
+                    "reply_timeout_sec": { "type": "integer", "description": "How long to wait for the reply (default 180)", "minimum": 5, "maximum": 1800 }
+                },
+                "required": ["prompt"],
+                "additionalProperties": false
+            }
+        }),
+        json!({
             "name": "muse_cancel",
             "description": "Cancel an in-flight agent turn for a session.",
             "inputSchema": {
@@ -487,6 +508,70 @@ pub async fn call(client: &Arc<MuseClient>, name: &str, args: Value) -> Result<S
                 .and_then(Value::as_u64)
                 .unwrap_or(40) as u32;
             Ok(pretty(client.history(session_id, limit).await?))
+        }
+        "muse_relay" => {
+            let prompt = required_str(&args, "prompt")?;
+            let relay = crate::relay::RelayHeaders {
+                muse_session_id: args
+                    .get("muse_session_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                dsh_session_id: args
+                    .get("dsh_session_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                request_id: args
+                    .get("request_id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            };
+            if relay.is_empty() {
+                bail!(
+                    "muse_relay needs at least one of muse_session_id, dsh_session_id, request_id"
+                );
+            }
+            let headers = relay.to_headers()?;
+            let session_id = relay.muse_session_id.clone();
+            let timeout = args
+                .get("reply_timeout_sec")
+                .and_then(Value::as_u64)
+                .unwrap_or(180);
+            let attachments: Vec<PathBuf> = args
+                .get("attachments")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(PathBuf::from)
+                        .collect()
+                })
+                .unwrap_or_default();
+            let started = std::time::Instant::now();
+            let outcome = client
+                .ask_and_wait_with_headers(
+                    &prompt,
+                    session_id.as_deref(),
+                    &attachments,
+                    std::time::Duration::from_secs(timeout.clamp(5, 1800)),
+                    std::time::Duration::from_secs(2),
+                    &headers,
+                )
+                .await?;
+            let text = outcome
+                .reply
+                .get("display_text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            Ok(pretty(json!({
+                "relay": relay.to_json(),
+                "session_id": outcome.session_id,
+                "sent_message_id": outcome.sent_message_id,
+                "replied": !text.is_empty(),
+                "text": text,
+                "elapsed_ms": started.elapsed().as_millis() as u64,
+            })))
         }
         "muse_ask" => {
             let prompt = required_str(&args, "prompt")?;
