@@ -10,6 +10,39 @@ use std::sync::Arc;
 
 pub const PROTOCOL_VERSION: &str = "2024-11-05";
 
+/// Handshake text handed to every MCP client. It states the operating
+/// constraints a caller needs before it starts choosing tools, because a wrong
+/// first assumption here costs a wasted turn: which transport carries what,
+/// where credentials live, and which tools degrade to agent mediation.
+pub const MUSE_INSTRUCTIONS: &str = "\
+Muse (Meta personal agent, com.facebook.aura / Hatch) tools.
+
+Auth: the session is reused from a state file (Windows %APPDATA%/muse-mcp, else \
+$XDG_CONFIG_HOME/muse-mcp or ~/.config/muse-mcp, override with MUSE_MCP_STATE). Call \
+muse_status first; only when it reports signed_in=false do you need muse_login_start then \
+muse_login_verify with a code the user reads back.
+
+Transports behind the tools: /api/* on muse.ai with browser cookies, /hatch/* on \
+hatch-api.meta.ai with a bearer token, and a Noise-encrypted WebSocket to the VM for \
+chat, goals, and the file API. Chat replies are not returned by the submit call, so \
+muse_ask and muse_relay poll history until the turn finishes.
+
+Files: /fs/* is confined to the VM workspace and rejects absolute paths and traversal. \
+Paths are workspace-relative: pass 'AGENTS.md', not '/workspace/AGENTS.md'. For \
+/etc, /proc, /var use muse_sys or muse_exec, which run through the agent inside the VM \
+and report transport=agent-shell. Their cost is one agent turn each, so prefer the \
+direct file API when the target is inside the workspace.
+
+Sub-chats: thread ids are derived from the name, so the same name always resumes the \
+same conversation. An unknown name is not created implicitly.
+
+Relay turns (DSH<->Muse): muse_relay puts museSessionId, dshSessionId, and requestId \
+on the wire and also reuses requestId as the transport x-request-id. The requestId is \
+not stored in the gateway transcript; correlate with the returned sent_message_id.
+
+Destructive calls (muse_rpc DELETE/PUT, muse_goals delete, muse_session_action delete) \
+need confirm=true. muse_fs_delete does not ask, and there is no restore route.";
+
 pub struct Server {
     client: Arc<MuseClient>,
 }
@@ -54,8 +87,7 @@ impl Server {
                         "name": "muse-mcp",
                         "version": env!("CARGO_PKG_VERSION"),
                     },
-                    "instructions": "Muse (Meta personal agent) tools. Call muse_login_start then \
-                        muse_login_verify once; the session is reused from the state file afterwards.",
+                    "instructions": MUSE_INSTRUCTIONS,
                 })),
                 "notifications/initialized" | "initialized" => {
                     continue;

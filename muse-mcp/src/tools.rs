@@ -146,7 +146,7 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": "muse_fs_read",
-            "description": "Read a file from the Muse VM workspace. Text is returned inline; binary is reported as base64 when requested.",
+            "description": "Read a file from the Muse VM workspace. Text comes back inline as utf8. A window that does not start on a UTF-8 character boundary returns base64 even for a text file, so shift offset by a byte or two when that happens.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -175,7 +175,7 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": "muse_fs_upload",
-            "description": "Upload a local file into the Muse VM workspace in 512 KiB chunks with staged rename for multi-chunk transfers.",
+            "description": "Upload a local file into the Muse VM workspace in 512 KiB chunks with staged rename for multi-chunk transfers. Same operation as muse_fs_put; both names exist for callers written against either one.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -188,7 +188,7 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": "muse_fs_delete",
-            "description": "Delete a path inside the Muse VM workspace.",
+            "description": "Delete a path inside the Muse VM workspace. The gateway has no restore route, so deletion is final. Use recursive=true only to remove a whole directory. Takes effect immediately and does not ask for confirmation.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -262,7 +262,7 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": "muse_fs_put",
-            "description": "Upload a local file into the workspace in 512 KiB chunks (staged rename for multi-chunk).",
+            "description": "Upload a local file into the workspace in 512 KiB chunks (staged rename for multi-chunk). Same operation as muse_fs_upload.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -334,7 +334,7 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": "muse_rpc",
-            "description": "Call any Hatch gateway route directly (escape hatch). GET/POST/PUT/PATCH/DELETE. Verified live routes include /api/goals, /api/activity, /api/artifacts, /api/connectors, /api/tasks, /api/feed, /api/identity, /api/chat/*, /api/session/*, /api/voice/*, /api/idea-cards, /api/onboarding/*, /api/navigation/tab-order, /api/product-improvements, /api/podcasts/feed, /api/computer/context. Destructive verbs require confirm=true.",
+            "description": "Call any Hatch gateway route directly (escape hatch). GET/POST/PUT/PATCH/DELETE. Verified readable: /api/goals, /api/activity, /api/artifacts, /api/connectors, /api/tasks, /api/feed, /api/identity, /api/chat/*, /api/session/*, /api/voice/*, /api/idea-cards, /api/onboarding/*, /api/navigation/tab-order, /api/product-improvements, /api/podcasts/feed, /api/computer/context. Closed to this client by the endpoint ACL (403 matched route missing from endpoint ACL): POST /api/tasks/shell, POST /api/connectors, POST /api/navigation/tab-order, /api/browser/lease, /api/feed/prompt, /api/artifacts/placement, /api/artifacts/save, /api/chat/delete-turn. Do not exist (404): /api/approvals*, /api/permissions/*, /api/spaces*, /api/exec, /api/terminal, /api/shell. Destructive verbs require confirm=true.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -430,7 +430,7 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": "muse_settings",
-            "description": "Read or change agent settings: model, permissions, tab order, product-improvement flags, active voice, chat themes. action=read returns all readable settings; set_tab_order and set_voice write them.",
+            "description": "Read or change agent settings. action=read returns eight sections: model, identity, tab_order, product_improvements, voice_active, chat_themes, onboarding_tasks, onboarding_variants. The gateway has no permissions endpoint, so permissions cannot be read or set here. set_tab_order and set_voice are the only writable actions.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
