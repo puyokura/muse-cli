@@ -85,6 +85,7 @@ async fn run() -> Result<()> {
     let client = Arc::new(MuseClient::new(state_path)?);
 
     let command = args.positionals.first().cloned().unwrap_or_default();
+    reject_unknown_flags(&command, &args)?;
     match command.as_str() {
         "mcp" | "serve" | "stdio" => mcp::Server::new(client).serve_stdio().await,
         "login" => cmd_login(&client, &args).await,
@@ -112,6 +113,56 @@ async fn run() -> Result<()> {
         "call" => cmd_call(&client, &args).await,
         other => bail!("unknown command `{other}`; run `muse help`"),
     }
+}
+
+/// Flags every command understands.
+const GLOBAL_FLAGS: [&str; 3] = ["state", "thread", "session"];
+
+/// Refuse a flag the chosen command does not read.
+///
+/// Without this, `muse history --muse-session <id>` silently returned the
+/// primary chat: the typo and the unsupported flag were both discarded, and the
+/// caller saw data that looked like an answer. A rejected flag is cheap; a
+/// wrong conversation returned as if it were the right one is not.
+fn reject_unknown_flags(command: &str, args: &Args) -> Result<()> {
+    let known: &[&str] = match command {
+        "status" | "ping" | "model" | "logout" | "tools" => &[],
+        "login" => &["start", "finish", "region"],
+        "threads" => &["all", "json"],
+        "thread" => &["confirm", "json"],
+        "chat" | "ask" => &["no-wait", "image", "file", "timeout", "json"],
+        "relay" => &[
+            "muse-session", "dsh-session", "request-id", "image", "file", "timeout", "poll",
+        ],
+        "history" => &["limit", "follow", "interval", "until-idle", "count", "json"],
+        "cancel" => &[],
+        "exec" | "run" => &["timeout"],
+        "sys" => &["timeout", "save", "out"],
+        "fs" => &[
+            "recursive", "confirm", "offset", "len", "base64", "ext", "preset",
+        ],
+        "goals" => &["json", "title", "summary", "description", "emoji"],
+        "settings" => &["json"],
+        "raw" => &["method", "out", "timeout", "json", "json-file", "set"],
+        "rpc" | "service" => &["json", "json-file", "set", "confirm"],
+        "approvals" => &["json", "confirm", "limit"],
+        "web" => &["csrf", "json", "json-file", "set"],
+        "call" => &["json", "json-file", "set"],
+        _ => return Ok(()),
+    };
+    for name in args.supplied() {
+        if GLOBAL_FLAGS.contains(&name.as_str()) || known.contains(&name.as_str()) {
+            continue;
+        }
+        let mut all: Vec<&str> = GLOBAL_FLAGS.to_vec();
+        all.extend_from_slice(known);
+        all.sort();
+        bail!(
+            "unknown flag `--{name}` for `muse {command}`; known flags: {}",
+            all.join(", ")
+        );
+    }
+    Ok(())
 }
 
 fn print_help() {
@@ -228,11 +279,38 @@ fn thread_name(args: &Args) -> Result<Option<String>> {
     thread::normalise(args.flag("thread"))
 }
 
+/// A raw session id given with `--session`.
+///
+/// Relay work targets session ids that were handed to us; those are not named
+/// threads, so they cannot go through `--thread`. Every command that reads or
+/// writes a conversation accepts this flag, and a value that is not a UUID is
+/// refused rather than looked up.
+fn session_flag(args: &Args) -> Result<Option<String>> {
+    let Some(raw) = args
+        .flag("session")
+        .or_else(|| args.flag("muse-session"))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    if !crate::relay::is_uuid(raw) {
+        bail!("--session expects a lower-case session UUID; got `{raw}`");
+    }
+    Ok(Some(raw.to_string()))
+}
+
 /// Resolve `--thread` to a session id, refusing to invent one.
+///
+/// `--session` takes precedence: it names a conversation directly, so there is
+/// nothing to look up.
 async fn resolve_thread(
     client: &MuseClient,
     args: &Args,
 ) -> Result<(Option<String>, Option<String>)> {
+    if let Some(session_id) = session_flag(args)? {
+        return Ok((Some(session_id), None));
+    }
     let Some(name) = thread_name(args)? else {
         return Ok((None, None));
     };

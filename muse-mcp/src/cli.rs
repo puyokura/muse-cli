@@ -106,6 +106,15 @@ impl Args {
         })
     }
 
+    /// Every flag and switch the caller supplied, for validation.
+    pub fn supplied(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.flags.keys().cloned().collect();
+        names.extend(self.switches.iter().cloned());
+        names.sort();
+        names.dedup();
+        names
+    }
+
     pub fn has(&self, name: &str) -> bool {
         self.switches.iter().any(|flag| flag == name) || self.flags.contains_key(name)
     }
@@ -235,6 +244,17 @@ mod tests {
         }
         assert!(!is_boolean_switch("thread"));
         assert!(!is_boolean_switch("path"));
+    }
+
+    #[test]
+    fn supplied_lists_switches_and_flags() {
+        let parsed = args(&["history", "--limit", "5", "--follow", "--session", "abc"]);
+        let names = parsed.supplied();
+        assert!(names.contains(&"limit".to_string()));
+        assert!(names.contains(&"follow".to_string()));
+        assert!(names.contains(&"session".to_string()));
+        // Positionals are not flags.
+        assert!(!names.contains(&"history".to_string()));
     }
 
     #[test]

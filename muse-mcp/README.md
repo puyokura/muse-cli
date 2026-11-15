@@ -75,6 +75,23 @@ muse status
 abra トークン（Stefi REST 用）とゲートウェイ資格情報は別物なので、状態ファイルでは
 `abra_token` と `hatch_credential` に分けて保存する。混ぜると REST が 401 になる。
 
+## セッションを直接指定する（`--session`）
+
+`--thread` は名前から導出したサブチャットを指す。Muse から渡されたセッション ID のように、
+名前を持たない会話を読み書きするときは `--session <uuid>` を使う。会話を扱うコマンド
+（`chat` / `relay` / `history` / `cancel` など）はすべてこれを受けける。
+
+```
+muse history --session eeb1c4d1-8927-84dd-8037-9a23d2e2b2f0 --limit 3
+```
+
+UUID でない値は拒否する。`--thread` と併用した場合は `--session` を優先する。
+
+**未知のフラグはエラーになる。** 以前は `muse history --muse-session <id>` が
+フラグを黙って捨てて primary の履歴を返していた。受け取った側からは「宛先の履歴」と
+見分けが付かないため、送達確認に使うと嘘の安心を与える。現在はコマンドごとに
+受け付けるフラグを宣言し、それ以外は名前を示して停止する。
+
 ## サブチャット（スレッド）
 
 `--thread <name>` を付けると、その名前専用のサブチャットで実行する。メインの会話を汚さない。
@@ -445,7 +462,7 @@ Windows と Linux の両方でビルド・実行を実測している。macOS �
 | 項目 | Windows | Linux |
 |---|---|---|
 | ビルド | `cargo build --release` | 同左（Debian 13 / rustc 1.99.1 で実測） |
-| テスト | 91 件 green（Windows） | 91 件 green（Debian 13 / rustc 1.99.1） |
+| テスト | 92 件 green（Windows） | 92 件 green（Debian 13 / rustc 1.99.1） |
 | 状態ファイル | `%APPDATA%\muse-mcp\session.json` | `$XDG_CONFIG_HOME/muse-mcp/session.json`、無ければ `$HOME/.config/...` |
 | 状態の権限 | 既定の ACL | 0600（ファイル）と 0700（ディレクトリ） |
 | 保存方式 | 一時ファイル→rename | 同左 |
