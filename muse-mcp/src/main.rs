@@ -105,6 +105,8 @@ async fn run() -> Result<()> {
         "settings" => cmd_settings(&client, &args).await,
         "raw" => cmd_raw(&client, &args).await,
         "rpc" => cmd_rpc(&client, &args).await,
+        "service" => cmd_service(&client, &args).await,
+        "approvals" => cmd_approvals(&client, &args).await,
         "web" => cmd_web(&client, &args).await,
         "tools" => print_tools(),
         "call" => cmd_call(&client, &args).await,
@@ -124,6 +126,7 @@ CHAT
   muse chat [prompt...]              Send a prompt and print the reply
   muse chat --thread <name> [...]    Run inside a named sub-chat
   muse relay <prompt...>             Send with DSH<->Muse correlation headers
+  muse approvals [list|show|decide]  List or decide agent approvals
   muse ask <prompt...>               Alias of chat
   muse threads [--all]               List primary chat and sub-chats
   muse thread new <name> [prompt...] Create a sub-chat
@@ -1225,6 +1228,189 @@ async fn cmd_raw(client: &Arc<MuseClient>, args: &Args) -> Result<()> {
             "detected": kind,
         }))
     );
+    Ok(())
+}
+
+/// List or decide the agent approvals that gate tool execution.
+async fn cmd_approvals(client: &Arc<MuseClient>, args: &Args) -> Result<()> {
+    let action = args.positional_opt(1).unwrap_or_else(|| "list".to_string());
+    match action.as_str() {
+        "list" => {
+            let snapshot = client.approvals().await?;
+            let pending = snapshot
+                .get("pending")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let recent = snapshot
+                .get("recent")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            if args.has("json") {
+                println!("{}", cli::render(&snapshot));
+                return Ok(());
+            }
+            if pending.is_empty() && recent.is_empty() {
+                println!("no approvals");
+                return Ok(());
+            }
+            for entry in &pending {
+                println!("{}", approval_line(entry, "pending"));
+            }
+            for entry in recent.iter().take(20) {
+                println!("{}", approval_line(entry, "recent"));
+            }
+            Ok(())
+        }
+        "show" => {
+            let approval_id = args
+                .positional_opt(2)
+                .ok_or_else(|| anyhow!("muse approvals show needs an approval id"))?;
+            let snapshot = client.approvals().await?;
+            let found = find_approval(&snapshot, &approval_id)
+                .ok_or_else(|| anyhow!("no approval with id {approval_id}"))?;
+            println!("{}", cli::render(&found));
+            Ok(())
+        }
+        "decide" => {
+            let approval_id = args
+                .positional_opt(2)
+                .ok_or_else(|| anyhow!("muse approvals decide needs an approval id"))?;
+            let decision = args
+                .positional_opt(3)
+                .ok_or_else(|| anyhow!("muse approvals decide needs a decision"))?;
+            validate_decision(&decision)?;
+            if !args.has("confirm") && !is_passive_decision(&decision) {
+                bail!(
+                    "{decision} grants access beyond this one call; pass --confirm. \
+                     Use allow_once for a single request."
+                );
+            }
+            let result = client
+                .decide_approvals(json!([{ "approval_id": approval_id, "decision": decision }]))
+                .await?;
+            println!("{}", cli::render(&decide_summary(&result)));
+            Ok(())
+        }
+        other => bail!("unknown approvals action {other}; expected list/show/decide"),
+    }
+}
+
+/// Decisions that only affect the request already waiting.
+pub(crate) fn is_passive_decision(decision: &str) -> bool {
+    matches!(decision, "allow_once" | "deny")
+}
+
+pub(crate) const DECISIONS: [&str; 7] = [
+    "allow_once",
+    "allow_session",
+    "allow_today",
+    "allow_always",
+    "auto_allow",
+    "deny",
+    "deny_always",
+];
+
+fn validate_decision(decision: &str) -> Result<()> {
+    if DECISIONS.contains(&decision) {
+        return Ok(());
+    }
+    bail!(
+        "unknown decision `{decision}`; expected one of {}",
+        DECISIONS.join(", ")
+    )
+}
+
+/// One line per approval: id, status, host or path, and why it was raised.
+fn approval_line(entry: &Value, tag: &str) -> String {
+    let id = entry
+        .get("approval_id")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let status = entry
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let reason = entry
+        .get("decision_reason")
+        .and_then(Value::as_str)
+        .or_else(|| entry.get("reason").and_then(Value::as_str))
+        .unwrap_or("");
+    let target = entry
+        .get("host")
+        .and_then(Value::as_str)
+        .map(|host| {
+            let method = entry.get("method").and_then(Value::as_str).unwrap_or("");
+            let path = entry.get("path").and_then(Value::as_str).unwrap_or("");
+            format!("{method} {host}{path}")
+        })
+        .or_else(|| {
+            entry
+                .get("binary_path")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    format!("{tag:<7} {id} {status:<10} {target} {reason}")
+}
+
+fn find_approval(snapshot: &Value, approval_id: &str) -> Option<Value> {
+    for key in ["pending", "pending_approvals", "recent"] {
+        let Some(list) = snapshot.get(key).and_then(Value::as_array) else {
+            continue;
+        };
+        if let Some(found) = list
+            .iter()
+            .find(|entry| entry.get("approval_id").and_then(Value::as_str) == Some(approval_id))
+        {
+            return Some(found.clone());
+        }
+    }
+    None
+}
+
+pub(crate) fn decide_summary(result: &Value) -> Value {
+    let results = result
+        .get("results")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let rows: Vec<Value> = results
+        .iter()
+        .map(|row| {
+            json!({
+                "approval_id": row.get("approval_id").cloned().unwrap_or(Value::Null),
+                "success": row.get("success").cloned().unwrap_or(Value::Null),
+                "error": row.get("error").cloned().unwrap_or(Value::Null),
+                "decision": row
+                    .get("approval")
+                    .and_then(|approval| approval.get("decision"))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+                "decision_reason": row
+                    .get("approval")
+                    .and_then(|approval| approval.get("decision_reason"))
+                    .cloned()
+                    .unwrap_or(Value::Null),
+            })
+        })
+        .collect();
+    json!({ "decided": rows.len(), "results": rows })
+}
+
+/// Call a route on a specific gateway service (`muse rpc` always uses the
+/// daemon).
+async fn cmd_service(client: &Arc<MuseClient>, args: &Args) -> Result<()> {
+    let service = args.positional(1, "SERVICE")?;
+    let service: u64 = service
+        .parse()
+        .map_err(|_| anyhow!("SERVICE must be a number; got {service}"))?;
+    let method = args.positional(2, "METHOD")?.to_ascii_uppercase();
+    let path = args.positional(3, "path")?;
+    let params = json_argument(args)?;
+    let value = client.raw_rpc_on(&method, &path, params, service).await?;
+    println!("{}", cli::render(&value));
     Ok(())
 }
 

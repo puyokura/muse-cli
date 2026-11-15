@@ -560,6 +560,32 @@ impl MuseClient {
         Ok(response.body)
     }
 
+    /// Pending and recently decided approvals.
+    ///
+    /// These live on the sentinel service, not the daemon: every `/approvals`
+    /// route returns 404 on the daemon (measured), and 200 on service 1.
+    pub async fn approvals(&self) -> Result<Value> {
+        self.raw_rpc_on("GET", "/approvals", None, crate::wire::SERVICE_SENTINEL)
+            .await
+    }
+
+    /// Decide one or more approvals in a single request.
+    ///
+    /// `decisions` is a list of `{"approval_id": ..., "decision": ...}` objects.
+    /// `decision` takes the lowercase enum the client sends (measured from the
+    /// serializer): allow_once, allow_session, allow_today, allow_always,
+    /// auto_allow, deny, deny_always. The server rejects camelCase with
+    /// "missing field `approval_id`".
+    pub async fn decide_approvals(&self, decisions: Value) -> Result<Value> {
+        self.raw_rpc_on(
+            "POST",
+            "/approvals/batch-decide",
+            Some(json!({ "decisions": decisions })),
+            crate::wire::SERVICE_SENTINEL,
+        )
+        .await
+    }
+
     pub async fn ping(&self) -> Result<Value> {
         self.rpc("POST", "/api/ping", Some(json!({}))).await
     }
@@ -595,6 +621,22 @@ impl MuseClient {
         path: &str,
         params: Option<Value>,
     ) -> Result<Value> {
+        self.raw_rpc_on(method, path, params, crate::wire::SERVICE_DAEMON)
+            .await
+    }
+
+    /// Same as [`Self::raw_rpc`] but addressed to a named gateway service.
+    ///
+    /// The daemon (0) carries /api routes. Other ids exist in the wire
+    /// protocol and answer different route sets, so probing for a route that
+    /// 404s on the daemon needs this.
+    pub async fn raw_rpc_on(
+        &self,
+        method: &str,
+        path: &str,
+        params: Option<Value>,
+        service: u64,
+    ) -> Result<Value> {
         if !path.starts_with('/') {
             bail!("Hatch path must start with '/'; got {path}");
         }
@@ -602,7 +644,27 @@ impl MuseClient {
             "GET" | "POST" | "PUT" | "PATCH" | "DELETE" => {}
             other => bail!("unsupported method {other}"),
         }
-        self.rpc(&method.to_ascii_uppercase(), path, params).await
+        self.rpc_on(&method.to_ascii_uppercase(), path, params, service)
+            .await
+    }
+
+    /// Route one RPC to a specific gateway service.
+    async fn rpc_on(
+        &self,
+        method: &str,
+        path: &str,
+        params: Option<Value>,
+        service: u64,
+    ) -> Result<Value> {
+        let connection = self.connect().await?;
+        let response = connection
+            .request(method, path, params, service, RPC_TIMEOUT)
+            .await?;
+        let response = response.ensure_ok()?;
+        if !response.is_json() {
+            bail!("{path} returned {} bytes of binary data", response.body.len());
+        }
+        Ok(unwrap_envelope(response.json()?)?)
     }
 
     /// Send a prompt and collect the streamed events.

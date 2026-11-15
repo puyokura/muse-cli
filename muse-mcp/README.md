@@ -205,6 +205,38 @@ muse raw /fs/export --method POST --json-file body.json --out export.bin
 保存済みクッキーで `auth_check` を再実行して abra トークンを再発行し、元の要求を1回だけ再試行する。
 OTP の再入力は不要。回復に失敗したときは「`muse login` が必要」と明示して止まる。
 
+## 承認（`muse approvals`）
+
+エージェントがツールを実行する前に、外への通信などを承認で止める仕組みがある。
+この承認は**デーモンではなく sentinel サービスに載っている**。実測では `/approvals` 系は
+デーモンで全て 404、サービス1で 200 だった。`muse rpc` はデーモン固定なので、
+承認に届くには `muse service 1 ...` か `muse approvals` を使う。
+
+```
+muse approvals                     一覧（pending と recent）
+muse approvals --json              全項目をそのまま
+muse approvals show <approval-id>  1件の詳細
+muse approvals decide <id> allow_once
+muse approvals decide <id> deny
+muse approvals decide <id> allow_always --confirm
+```
+
+一覧は1行1件で、id・状態・宛先・理由を出す。
+
+```
+recent  5c0b8bab-... timed_out  POST ruxa.xsns.jp/api/users/show egress approval request expired
+```
+
+決定に使える値は `allow_once` / `allow_session` / `allow_today` / `allow_always` /
+`auto_allow` / `deny` / `deny_always` の7つ。実際に送る JSON は
+`{"decisions":[{"approval_id":"...","decision":"deny"}]}` で、フィールド名は snake_case で
+なければならない（camelCase は `missing field approval_id` で 400 になる）。
+
+`allow_once` と `deny` 以外は、待っている要求の外へ効力が及ぶ。そのため `--confirm`
+（MCP では `confirm: true`）を要求する。無い場合は送信前に止まる。
+
+MCP では `muse_approvals` ツールが同じことをする（action=list/show/decide）。
+
 ## 遅いツールが他の呼び出しを止めない
 
 MCP のツール呼び出しは1本の読み取りループから切り離して実行する。以前は要求を順番に
@@ -262,7 +294,7 @@ MCP のツール呼び出しは1本の読み取りループから切り離して
 muse mcp
 ```
 
-stdio の JSON-RPC。ツールは 35 個。
+stdio の JSON-RPC。ツールは 36 個。
 
 | ツール | 内容 |
 |---|---|

@@ -47,6 +47,25 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         }),
         json!({
+            "name": "muse_approvals",
+            "description": "List, inspect, or decide the agent approvals that gate tool execution inside Muse. Approvals live on the sentinel gateway service, not the daemon; every /approvals route 404s on the daemon and 200s on service 1. Each entry carries approval_id, host, path, method, decision and decision_reason. Decisions use the lowercase enum allow_once / allow_session / allow_today / allow_always / auto_allow / deny / deny_always. Anything other than allow_once or deny grants access past the request already waiting, so it needs confirm=true.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["list", "show", "decide"], "description": "Defaults to list" },
+                    "approval_id": { "type": "string", "description": "Required for show and decide" },
+                    "decision": {
+                        "type": "string",
+                        "enum": ["allow_once", "allow_session", "allow_today", "allow_always", "auto_allow", "deny", "deny_always"],
+                        "description": "Required for decide"
+                    },
+                    "confirm": { "type": "boolean", "description": "Required for any decision other than allow_once or deny" },
+                    "limit": { "type": "integer", "description": "Maximum recent entries to list (default 20)", "minimum": 1 }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
             "name": "muse_ping",
             "description": "Round-trip the Hatch gateway over the encrypted channel to verify the VM connection.",
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
@@ -497,6 +516,82 @@ pub async fn call(client: &Arc<MuseClient>, name: &str, args: Value) -> Result<S
             client.disconnect().await;
             let result = http.logout().await?;
             Ok(pretty(json!({ "signed_out": true, "result": result })))
+        }
+        "muse_approvals" => {
+            let action = args.get("action").and_then(Value::as_str).unwrap_or("list");
+            match action {
+                "list" => {
+                    let snapshot = client.approvals().await?;
+                    let limit = args
+                        .get("limit")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(20) as usize;
+                    let pending: Vec<Value> = snapshot
+                        .get("pending")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    let recent: Vec<Value> = snapshot
+                        .get("recent")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default()
+                        .into_iter()
+                        .take(limit)
+                        .collect();
+                    Ok(pretty(json!({
+                        "emitted_at_ms": snapshot.get("emitted_at_ms").cloned().unwrap_or(Value::Null),
+                        "next_cursor": snapshot.get("next_cursor").cloned().unwrap_or(Value::Null),
+                        "pending_count": pending.len(),
+                        "pending": pending,
+                        "recent": recent,
+                    })))
+                }
+                "show" => {
+                    let approval_id = required_str(&args, "approval_id")?;
+                    let snapshot = client.approvals().await?;
+                    let mut found = None;
+                    for key in ["pending", "pending_approvals", "recent"] {
+                        let Some(list) = snapshot.get(key).and_then(Value::as_array) else {
+                            continue;
+                        };
+                        if let Some(entry) = list.iter().find(|entry| {
+                            entry.get("approval_id").and_then(Value::as_str)
+                                == Some(approval_id.as_str())
+                        }) {
+                            found = Some(entry.clone());
+                            break;
+                        }
+                    }
+                    let approval =
+                        found.ok_or_else(|| anyhow!("no approval with id {approval_id}"))?;
+                    Ok(pretty(approval))
+                }
+                "decide" => {
+                    let approval_id = required_str(&args, "approval_id")?;
+                    let decision = required_str(&args, "decision")?;
+                    if !crate::DECISIONS.contains(&decision.as_str()) {
+                        bail!(
+                            "unknown decision `{decision}`; expected one of {}",
+                            crate::DECISIONS.join(", ")
+                        );
+                    }
+                    let passive = matches!(decision.as_str(), "allow_once" | "deny");
+                    if !passive && !args.get("confirm").and_then(Value::as_bool).unwrap_or(false) {
+                        bail!(
+                            "{decision} grants access beyond this one call; pass confirm=true. \
+                             Use allow_once for a single request."
+                        );
+                    }
+                    let result = client
+                        .decide_approvals(json!([
+                            { "approval_id": approval_id, "decision": decision }
+                        ]))
+                        .await?;
+                    Ok(pretty(crate::decide_summary(&result)))
+                }
+                other => bail!("unknown approvals action {other}; expected list/show/decide"),
+            }
         }
         "muse_ping" => Ok(pretty(client.ping().await?)),
         "muse_model" => Ok(pretty(client.model().await?)),
