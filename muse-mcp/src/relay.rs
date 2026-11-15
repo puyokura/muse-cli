@@ -240,10 +240,18 @@ pub fn render_block(muse_session_id: &str, dsh_session_id: &str, request_id: &st
 /// caller also supplies one it has to agree, otherwise the header would claim a
 /// session that is not the sender.
 pub fn resolve_dsh_session(argument: Option<&str>) -> Result<String> {
-    let from_env = std::env::var("DSH_SESSION_ID")
-        .ok()
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty());
+    let from_env = std::env::var("DSH_SESSION_ID").ok();
+    resolve_dsh_session_from(argument, from_env.as_deref())
+}
+
+/// The same rule with the environment supplied, so it can be tested without
+/// mutating process-wide state. Environment mutation in tests races against
+/// every other test in the same binary.
+fn resolve_dsh_session_from(argument: Option<&str>, env: Option<&str>) -> Result<String> {
+    let from_env = env
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
     let from_arg = argument
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -549,32 +557,49 @@ mod tests {
     }
 
     // AC-3: a dsh session that disagrees with the environment is refused.
+    // AC-3: the sender is the session the server was started for. These call
+    // the pure resolver rather than mutating DSH_SESSION_ID, which is
+    // process-wide and would race with every other test in the binary.
     #[test]
-    fn mismatched_dsh_session_is_refused() {
-        let previous = std::env::var("DSH_SESSION_ID").ok();
-        std::env::set_var("DSH_SESSION_ID", DSH_A);
-        let wrong = RelayEnvelope::resolve(Some(MUSE_A), Some("other-session"), Some("r"), "x");
-        let right = RelayEnvelope::resolve(Some(MUSE_A), Some(DSH_A), Some("r"), "x");
-        let auto = RelayEnvelope::resolve(Some(MUSE_A), None, Some("r"), "x");
-        match previous {
-            Some(value) => std::env::set_var("DSH_SESSION_ID", value),
-            None => std::env::remove_var("DSH_SESSION_ID"),
-        }
-        assert!(wrong.is_err(), "a differing dsh session must be refused");
-        assert_eq!(right.expect("explicit matches env").dsh_session_id, DSH_A);
-        assert_eq!(auto.expect("env fills in").dsh_session_id, DSH_A);
+    fn a_dsh_session_that_disagrees_with_the_environment_is_refused() {
+        let outcome = resolve_dsh_session_from(Some("other-session"), Some(DSH_A));
+        assert!(outcome.is_err(), "a differing dsh session must be refused");
     }
 
     #[test]
-    fn missing_dsh_session_everywhere_is_refused() {
-        let previous = std::env::var("DSH_SESSION_ID").ok();
-        std::env::remove_var("DSH_SESSION_ID");
-        let outcome = RelayEnvelope::resolve(Some(MUSE_A), None, Some("r"), "x");
-        match previous {
-            Some(value) => std::env::set_var("DSH_SESSION_ID", value),
-            None => std::env::remove_var("DSH_SESSION_ID"),
-        }
-        assert!(outcome.is_err(), "no session id anywhere means no delivery");
+    fn an_explicit_dsh_session_that_matches_the_environment_is_accepted() {
+        assert_eq!(
+            resolve_dsh_session_from(Some(DSH_A), Some(DSH_A)).expect("matches"),
+            DSH_A
+        );
+    }
+
+    #[test]
+    fn the_environment_fills_in_a_missing_dsh_session() {
+        assert_eq!(
+            resolve_dsh_session_from(None, Some(DSH_A)).expect("env fills in"),
+            DSH_A
+        );
+        // Whitespace around the value is not a mismatch.
+        assert_eq!(
+            resolve_dsh_session_from(Some(DSH_A), Some(&format!("  {DSH_A}  "))).expect("trimmed"),
+            DSH_A
+        );
+    }
+
+    #[test]
+    fn no_dsh_session_anywhere_is_refused() {
+        assert!(resolve_dsh_session_from(None, None).is_err());
+        assert!(resolve_dsh_session_from(None, Some("   ")).is_err());
+        assert!(resolve_dsh_session_from(Some(""), Some("")).is_err());
+    }
+
+    #[test]
+    fn a_standalone_argument_is_used_when_the_environment_is_absent() {
+        assert_eq!(
+            resolve_dsh_session_from(Some(DSH_A), None).expect("argument alone"),
+            DSH_A
+        );
     }
 
     // AC-4: a body block that contradicts the server stops the send.

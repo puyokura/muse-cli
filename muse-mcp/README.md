@@ -156,6 +156,11 @@ muse fs library [--preset recents|media|artifacts]
 ## その他
 
 ```
+muse chat --file <path>     添付をファイルとして送る（ワークスペースに保存される）
+muse chat --image <path>    添付を画像として送る（インラインで展開される）
+```
+
+```
 muse ping | model | status
 muse history [--thread N] [--limit N]
 muse cancel <session-id>
@@ -204,6 +209,35 @@ muse raw /fs/export --method POST --json-file body.json --out export.bin
 ゲートウェイが 401（`hatchAdmissionInvalidated` / `session_invalid`）を返した場合、
 保存済みクッキーで `auth_check` を再実行して abra トークンを再発行し、元の要求を1回だけ再試行する。
 OTP の再入力は不要。回復に失敗したときは「`muse login` が必要」と明示して止まる。
+
+## ファイルの送信
+
+添付には2種類あり、ゲートウェイの扱いが違う。実測で区別がついた。
+
+| 種別 | フラグ / 引数 | ゲートウェイの扱い | 上限 |
+|---|---|---|---|
+| 画像 | `--image` / `attachment_kind: "image"` | デコードしてエージェントが中身を見る。壊れた画像はターンごと失敗する | 3.5 MB |
+| ファイル | `--file` / `attachment_kind: "file"` | `workspace/user/files/<name>` に保存し、本文に `[file:mime path]` として参照を置く | 10 MB |
+
+```
+muse chat --file report.pdf "この PDF の要約をして"
+muse relay --file notes.md --muse-session <id> "この内容に沿って返信して"
+```
+
+MCP は `attachments` に絶対パスを並べ、`attachment_kind` で種別を選ぶ。既定は `image`。
+
+`--image` と `--file` は同時に指定できない。混在させると、どちらの形式で出すかを
+サーバが勝手に決めることになるため、エラーにして選ばせる。`--image` に画像以外を渡しても
+止まる（`pass it with --file instead`）。
+
+MIME は拡張子から決める。ゲートウェイは値そのものを検証しない（pdf / zip / mp4 / json で
+通ることを実測）ので、未知の拡張子は `application/octet-stream` と正直に申告する。
+
+上限は実測値。1.5MB・5MB・10MB は通り、20MB は 60 秒でタイムアウトした。20MB は
+サイズ上限ではなく、単一リクエストの転送時間が先に尽きる。
+
+保存先はワークスペースの `workspace/user/files/`。ゲートウェイが付けるパスは
+`workspace/user/files/<name>` で、`fs stat` には `/workspace/user/files/<name>` を渡す。
 
 ## 承認（`muse approvals`）
 
@@ -411,7 +445,7 @@ Windows と Linux の両方でビルド・実行を実測している。macOS �
 | 項目 | Windows | Linux |
 |---|---|---|
 | ビルド | `cargo build --release` | 同左（Debian 13 / rustc 1.99.1 で実測） |
-| テスト | 84 件 green（Windows） | 84 件 green（Debian 13 / rustc 1.99.1） |
+| テスト | 91 件 green（Windows） | 91 件 green（Debian 13 / rustc 1.99.1） |
 | 状態ファイル | `%APPDATA%\muse-mcp\session.json` | `$XDG_CONFIG_HOME/muse-mcp/session.json`、無ければ `$HOME/.config/...` |
 | 状態の権限 | 既定の ACL | 0600（ファイル）と 0700（ディレクトリ） |
 | 保存方式 | 一時ファイル→rename | 同左 |

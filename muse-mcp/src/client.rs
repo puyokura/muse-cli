@@ -226,6 +226,59 @@ mod tests {
     }
 
     #[test]
+    fn mime_is_mapped_by_extension() {
+        use std::path::PathBuf;
+        assert_eq!(mime_for(&PathBuf::from("a.png")), "image/png");
+        assert_eq!(mime_for(&PathBuf::from("a.JPG")), "image/jpeg");
+        assert_eq!(mime_for(&PathBuf::from("a.pdf")), "application/pdf");
+        assert_eq!(mime_for(&PathBuf::from("a.md")), "text/plain");
+        assert_eq!(mime_for(&PathBuf::from("a.zzz")), "application/octet-stream");
+        assert_eq!(mime_for(&PathBuf::from("noext")), "application/octet-stream");
+    }
+
+    #[test]
+    fn an_image_flag_refuses_a_non_image() {
+        use std::path::PathBuf;
+        let dir = std::env::temp_dir().join("muse-mime-test");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let txt = dir.join("note.txt");
+        std::fs::write(&txt, b"body").expect("write");
+        let outcome = attachment_item(&txt, AttachmentKind::Image);
+        let _ = std::fs::remove_dir_all(&dir);
+        let message = format!("{}", outcome.expect_err("not an image"));
+        assert!(message.contains("not an image"), "got: {message}");
+        assert!(message.contains("--file"), "the fix should be named: {message}");
+    }
+
+    #[test]
+    fn a_file_flag_accepts_any_extension() {
+        use std::path::PathBuf;
+        let dir = std::env::temp_dir().join("muse-mime-test-file");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let bin = dir.join("blob.zzz");
+        std::fs::write(&bin, b"body").expect("write");
+        let item = attachment_item(&bin, AttachmentKind::File).expect("file item");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(item["type"], "file");
+        assert_eq!(item["mime_type"], "application/octet-stream");
+        assert_eq!(item["filename"], "blob.zzz");
+    }
+
+    #[test]
+    fn attachment_limits_are_enforced() {
+        use std::path::PathBuf;
+        assert!(IMAGE_LIMIT < FILE_LIMIT, "files should allow more than images");
+        let dir = std::env::temp_dir().join("muse-mime-test-big");
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let big = dir.join("big.png");
+        // One byte over the image limit, valid-looking extension only.
+        std::fs::write(&big, vec![0u8; IMAGE_LIMIT + 1]).expect("write");
+        let outcome = attachment_item(&big, AttachmentKind::Image);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(outcome.is_err(), "an oversized image must be refused");
+    }
+
+    #[test]
     fn base64_round_trip() {
         let bytes = b"binary\x00payload";
         let encoded = base64_encode(bytes);
@@ -673,9 +726,10 @@ impl MuseClient {
         prompt: &str,
         session_id: Option<&str>,
         attachments: &[PathBuf],
+        kind: AttachmentKind,
         idle_timeout: std::time::Duration,
     ) -> Result<Vec<Value>> {
-        self.ask_with_headers(prompt, session_id, attachments, idle_timeout, &[])
+        self.ask_with_headers(prompt, session_id, attachments, kind, idle_timeout, &[])
             .await
     }
 
@@ -686,6 +740,7 @@ impl MuseClient {
         prompt: &str,
         session_id: Option<&str>,
         attachments: &[PathBuf],
+        kind: AttachmentKind,
         idle_timeout: std::time::Duration,
         extra: &[Header],
     ) -> Result<Vec<Value>> {
@@ -695,7 +750,7 @@ impl MuseClient {
         let connection = self.connect().await?;
         let mut items: Vec<Value> = Vec::new();
         for path in attachments {
-            items.push(image_item(path)?);
+            items.push(attachment_item(path, kind)?);
         }
         items.push(json!({ "type": "text", "text": prompt }));
 
@@ -720,6 +775,7 @@ impl MuseClient {
         prompt: &str,
         session_id: Option<&str>,
         attachments: &[PathBuf],
+        kind: AttachmentKind,
         reply_timeout: std::time::Duration,
         poll_interval: std::time::Duration,
     ) -> Result<AskOutcome> {
@@ -727,6 +783,7 @@ impl MuseClient {
             prompt,
             session_id,
             attachments,
+            kind,
             reply_timeout,
             poll_interval,
             &[],
@@ -740,12 +797,13 @@ impl MuseClient {
         prompt: &str,
         session_id: Option<&str>,
         attachments: &[PathBuf],
+        kind: AttachmentKind,
         reply_timeout: std::time::Duration,
         poll_interval: std::time::Duration,
         extra: &[Header],
     ) -> Result<AskOutcome> {
         let events = self
-            .ask_with_headers(prompt, session_id, attachments, reply_timeout, extra)
+            .ask_with_headers(prompt, session_id, attachments, kind, reply_timeout, extra)
             .await?;
         // A submission that produced no acknowledgement never reached the
         // gateway. Reporting "no reply" for it would read as "the agent stayed
@@ -1207,8 +1265,31 @@ pub fn base64_encode(data: &[u8]) -> String {
 }
 
 
-fn image_item(path: &Path) -> Result<Value> {
-    let mime = match path
+/// How an attachment should be delivered.
+///
+/// The gateway treats these differently: `image` items are decoded so the agent
+/// can see them (a malformed file fails the whole turn), while `file` items are
+/// stored at `workspace/user/files/<name>` and referenced as text. Picking one
+/// is the caller's decision, so the two flags stay separate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AttachmentKind {
+    Image,
+    File,
+}
+
+/// Images are inlined into a request the model reads; the gateway's practical
+/// budget is a few megabytes.
+const IMAGE_LIMIT: usize = 3_500_000;
+
+/// Files are stored, not decoded. 10 MiB transferred intact in testing; past
+/// that the single JSON request gets large enough to be worth avoiding.
+const FILE_LIMIT: usize = 10_000_000;
+
+/// Map an extension to a MIME type. The gateway accepts any value (probed with
+/// pdf, zip, mp4, and json), so an unknown extension reports what it is rather
+/// than guessing something the receiver would trust.
+pub fn mime_for(path: &Path) -> &'static str {
+    match path
         .extension()
         .and_then(|ext| ext.to_str())
         .unwrap_or_default()
@@ -1219,24 +1300,66 @@ fn image_item(path: &Path) -> Result<Value> {
         "jpg" | "jpeg" => "image/jpeg",
         "webp" => "image/webp",
         "gif" => "image/gif",
-        other => bail!("unsupported attachment type .{other} (expected png/jpeg/webp/gif)"),
-    };
-    let raw = std::fs::read(path)
-        .map_err(|err| anyhow!("cannot read attachment {}: {err}", path.display()))?;
-    const LIMIT: usize = 3_500_000;
-    if raw.len() > LIMIT {
+        "avif" => "image/avif",
+        "heic" => "image/heic",
+        "pdf" => "application/pdf",
+        "json" => "application/json",
+        "txt" | "md" | "log" => "text/plain",
+        "csv" => "text/csv",
+        "html" | "htm" => "text/html",
+        "xml" => "application/xml",
+        "yaml" | "yml" => "application/yaml",
+        "zip" => "application/zip",
+        "gz" => "application/gzip",
+        "tar" => "application/x-tar",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        "webm" => "video/webm",
+        "rs" | "py" | "js" | "ts" | "go" | "c" | "h" | "sh" => "text/plain",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Build one attachment item for `/chat/stream`.
+fn attachment_item(path: &Path, kind: AttachmentKind) -> Result<Value> {
+    let mime = mime_for(path);
+    if kind == AttachmentKind::Image && !mime.starts_with("image/") {
         bail!(
-            "attachment {} is {} bytes; the gateway's inline base64 budget is {LIMIT} bytes. \
-             Resize it first.",
-            path.display(),
-            raw.len()
+            "{} is not an image ({mime}); pass it with --file instead of --image",
+            path.display()
         );
     }
+    let raw = std::fs::read(path)
+        .map_err(|err| anyhow!("cannot read attachment {}: {err}", path.display()))?;
+    let limit = match kind {
+        AttachmentKind::Image => IMAGE_LIMIT,
+        AttachmentKind::File => FILE_LIMIT,
+    };
+    if raw.len() > limit {
+        bail!(
+            "attachment {} is {} bytes, over the {limit}-byte limit for {} attachments",
+            path.display(),
+            raw.len(),
+            match kind {
+                AttachmentKind::Image => "image",
+                AttachmentKind::File => "file",
+            }
+        );
+    }
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("attachment");
     Ok(json!({
-        "type": "image",
+        "type": match kind {
+            AttachmentKind::Image => "image",
+            AttachmentKind::File => "file",
+        },
         "mime_type": mime,
         "data_base64": base64_encode(&raw),
-        "filename": path.file_name().and_then(|name| name.to_str()).unwrap_or("image"),
+        "filename": name,
     }))
 }
 

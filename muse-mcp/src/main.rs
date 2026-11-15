@@ -126,6 +126,8 @@ CHAT
   muse chat [prompt...]              Send a prompt and print the reply
   muse chat --thread <name> [...]    Run inside a named sub-chat
   muse relay <prompt...>             Send with DSH<->Muse correlation headers
+  muse chat --file <path> [...]      Attach a file (stored in the workspace)
+  muse chat --image <path> [...]     Attach an image (viewed inline)
   muse approvals [list|show|decide]  List or decide agent approvals
   muse ask <prompt...>               Alias of chat
   muse threads [--all]               List primary chat and sub-chats
@@ -489,21 +491,50 @@ async fn cmd_thread(client: &Arc<MuseClient>, args: &Args) -> Result<()> {
     }
 }
 
+/// Attachments and their delivery form from `--image` / `--file`.
+///
+/// The two flags are mutually exclusive on purpose: mixing them would ask for a
+/// shape the gateway has no single answer for, and silently picking one form
+/// for the other's files is worse than an error.
+fn chat_attachments(args: &Args) -> Result<(Vec<PathBuf>, client::AttachmentKind)> {
+    let images: Vec<PathBuf> = args
+        .flag_all("image")
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+    let files: Vec<PathBuf> = args
+        .flag_all("file")
+        .into_iter()
+        .map(PathBuf::from)
+        .collect();
+
+    match (images.is_empty(), files.is_empty()) {
+        (false, false) => bail!(
+            "pass --image or --file, not both: they are delivered differently \
+             (viewed inline vs stored in the workspace)"
+        ),
+        (true, _) => Ok((files, client::AttachmentKind::File)),
+        (_, true) => Ok((images, client::AttachmentKind::Image)),
+    }
+}
+
 async fn cmd_chat(client: &Arc<MuseClient>, args: &Args) -> Result<()> {
     let prompt = args
         .rest_joined(1)
         .filter(|text| !text.trim().is_empty())
         .ok_or_else(|| anyhow!("muse chat needs a prompt"))?;
     let (session_id, name) = resolve_thread(client, args).await?;
-    let images: Vec<PathBuf> = args
-        .flag_all("image")
-        .into_iter()
-        .map(PathBuf::from)
-        .collect();
+    let (attachments, kind) = chat_attachments(args)?;
 
     if args.has("no-wait") {
         let events = client
-            .ask(&prompt, session_id.as_deref(), &images, reply_timeout(args)?)
+            .ask(
+                &prompt,
+                session_id.as_deref(),
+                &attachments,
+                kind,
+                reply_timeout(args)?,
+            )
             .await?;
         println!(
             "{}",
@@ -521,7 +552,8 @@ async fn cmd_chat(client: &Arc<MuseClient>, args: &Args) -> Result<()> {
         .ask_and_wait(
             &prompt,
             session_id.as_deref(),
-            &images,
+            &attachments,
+            kind,
             reply_timeout(args)?,
             Duration::from_secs(2),
         )
@@ -566,11 +598,7 @@ async fn cmd_relay(client: &Arc<MuseClient>, args: &Args) -> Result<()> {
         }
     }
 
-    let images: Vec<PathBuf> = args
-        .flag_all("image")
-        .into_iter()
-        .map(PathBuf::from)
-        .collect();
+    let (attachments, kind) = chat_attachments(args)?;
     let envelope = relay::RelayEnvelope::resolve(
         relay.muse_session_id.as_deref().or(thread_session.as_deref()),
         relay.dsh_session_id.as_deref(),
@@ -584,7 +612,8 @@ async fn cmd_relay(client: &Arc<MuseClient>, args: &Args) -> Result<()> {
         .ask_and_wait_with_headers(
             &envelope.body,
             Some(&envelope.muse_session_id),
-            &images,
+            &attachments,
+            kind,
             reply_timeout(args)?,
             Duration::from_secs(args.flag_u64("poll")?.unwrap_or(2).max(1)),
             &headers,

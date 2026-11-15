@@ -16,7 +16,7 @@
 //! the same sub-chat. That keeps experiments out of the primary conversation
 //! without any server-side bookkeeping.
 
-use crate::client::MuseClient;
+use crate::client::{AttachmentKind, MuseClient};
 use anyhow::{anyhow, bail, Result};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -194,7 +194,7 @@ pub async fn ensure(
         .unwrap_or_else(|| format!("このスレッドは「{name}」専用です。以降はこのスレッドで作業します。"));
 
     let outcome = client
-        .ask_and_wait(&prompt, Some(&id), &[], timeout, std::time::Duration::from_secs(2))
+        .ask_and_wait(&prompt, Some(&id), &[], AttachmentKind::File, timeout, std::time::Duration::from_secs(2))
         .await?;
 
     // The server derives a title from the prompt; replace it with the caller's

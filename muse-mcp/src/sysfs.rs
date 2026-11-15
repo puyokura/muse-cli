@@ -16,7 +16,7 @@ use anyhow::{bail, Result};
 use serde_json::{json, Value};
 use std::time::Duration;
 
-use crate::client::MuseClient;
+use crate::client::{AttachmentKind, MuseClient};
 
 /// Where the agent-side command ran. Reported verbatim in every result.
 pub const TRANSPORT: &str = "agent-shell";
@@ -184,6 +184,7 @@ pub async fn exec(
             &prompt,
             session_id,
             &[],
+            AttachmentKind::File,
             timeout,
             Duration::from_secs(2),
         )

@@ -103,7 +103,12 @@ pub fn definitions() -> Vec<Value> {
                     "attachments": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Absolute paths to PNG/JPEG/WebP/GIF files to attach"
+                        "description": "Absolute paths to files to attach"
+                    },
+                    "attachment_kind": {
+                        "type": "string",
+                        "enum": ["image", "file"],
+                        "description": "How to deliver attachments. image (default) inlines them so the agent can look at them and requires an image extension; file stores them in the VM workspace under user/files and references them as text."
                     },
                     "wait_for_reply": { "type": "boolean", "description": "Poll history for the assistant reply (default true)" },
                     "reply_timeout_sec": { "type": "integer", "description": "How long to wait for the reply (default 180)", "minimum": 5, "maximum": 1800 }
@@ -114,7 +119,7 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": "muse_relay",
-            "description": "Send one prompt to Muse on the relay path. The server resolves museSessionId, dshSessionId, and requestId, refuses anything it cannot attribute, and prepends a [muse-relay] block to the body itself, matching the format Muse uses toward DSH; the same three values also go on the wire as headers. Do not write a [muse-relay] block into prompt: a block contradicting the resolved values is an error, and an identical one is stripped. museSessionId is required and must be a lower-case UUID. dshSessionId comes from DSH_SESSION_ID when omitted and is checked against the argument when both exist. requestId is kept verbatim for replies and generated as dsh-<uuid> when absent. Each delivery is recorded in relay-audit.jsonl next to the session state, with the three ids and the outcome but not the body.",
+            "description": "Send one prompt to Muse on the relay path. The server resolves museSessionId, dshSessionId, and requestId, refuses anything it cannot attribute, and prepends a [muse-relay] block to the body itself, matching the format Muse uses toward DSH; the same three values also go on the wire as headers. Do not write a [muse-relay] block into prompt: a block contradicting the resolved values is an error, and an identical one is stripped. museSessionId is required and must be a lower-case UUID. dshSessionId comes from DSH_SESSION_ID when omitted and is checked against the argument when both exist. requestId is kept verbatim for replies and generated as dsh-<uuid> when absent. Each delivery is recorded in relay-audit.jsonl next to the session state, with the three ids and the outcome but not the body. Attachments go through attachment_kind: image (default, inlined so the agent can look at it) or file (stored under user/files in the VM workspace and referenced as text).",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -125,7 +130,12 @@ pub fn definitions() -> Vec<Value> {
                     "attachments": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Absolute paths to PNG/JPEG/WebP/GIF files to attach"
+                        "description": "Absolute paths to files to attach"
+                    },
+                    "attachment_kind": {
+                        "type": "string",
+                        "enum": ["image", "file"],
+                        "description": "How to deliver attachments: image inlines them, file stores them in the VM workspace."
                     },
                     "reply_timeout_sec": { "type": "integer", "description": "How long to wait for the reply (default 180)", "minimum": 5, "maximum": 1800 }
                 },
@@ -637,6 +647,7 @@ pub async fn call(client: &Arc<MuseClient>, name: &str, args: Value) -> Result<S
                     &envelope.body,
                     Some(&envelope.muse_session_id),
                     &attachments,
+                    crate::client::AttachmentKind::File,
                     std::time::Duration::from_secs(timeout.clamp(5, 1800)),
                     std::time::Duration::from_secs(2),
                     &headers,
@@ -695,6 +706,7 @@ pub async fn call(client: &Arc<MuseClient>, name: &str, args: Value) -> Result<S
                         .collect()
                 })
                 .unwrap_or_default();
+            let kind = attachment_kind(&args)?;
 
             if !wait {
                 let events = client
@@ -702,6 +714,7 @@ pub async fn call(client: &Arc<MuseClient>, name: &str, args: Value) -> Result<S
                         &prompt,
                         session_id,
                         &attachments,
+                        kind,
                         std::time::Duration::from_secs(45),
                     )
                     .await?;
@@ -717,6 +730,7 @@ pub async fn call(client: &Arc<MuseClient>, name: &str, args: Value) -> Result<S
                     &prompt,
                     session_id,
                     &attachments,
+                    kind,
                     std::time::Duration::from_secs(timeout),
                     std::time::Duration::from_secs(2),
                 )
@@ -1271,6 +1285,20 @@ fn is_destructive(method: &str, path: &str) -> bool {
             || path.contains("/disconnect")
             || path.contains("/unlink")
             || path.contains("/revoke"))
+}
+
+/// Which attachment form the caller asked for.
+///
+/// `image` items are decoded for the model to look at; `file` items are stored
+/// and referenced. The default is image so an existing call that only sends a
+/// screenshot keeps working.
+fn attachment_kind(args: &Value) -> Result<crate::client::AttachmentKind> {
+    use crate::client::AttachmentKind;
+    match args.get("attachment_kind").and_then(Value::as_str) {
+        None | Some("image") => Ok(AttachmentKind::Image),
+        Some("file") => Ok(AttachmentKind::File),
+        Some(other) => bail!("attachment_kind must be image or file; got {other}"),
+    }
 }
 
 fn required_str(args: &Value, key: &str) -> Result<String> {
