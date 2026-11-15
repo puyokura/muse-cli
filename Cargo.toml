@@ -1,8 +1,8 @@
 [package]
-name = "muse-mcp"
+name = "muse-cli"
 version = "0.1.0"
 edition = "2021"
-description = "MCP server for Meta Muse (Hatch) agent"
+description = "Terminal client and MCP server for Meta Muse (Hatch)"
 
 [[bin]]
 name = "muse"
@@ -28,3 +28,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
+# Terminal UI
+ratatui = "0.29"
+crossterm = "0.28"

@@ -1,4 +1,4 @@
-# muse
+# muse-cli
 
 Meta Muse（`com.facebook.aura`、通称 Hatch）を CLI から操作する Rust 製ツール。
 同じバイナリが `muse mcp` で MCP サーバーにもなる。
@@ -8,11 +8,58 @@ Meta Muse（`com.facebook.aura`、通称 Hatch）を CLI から操作する Rust
 ## ビルド
 
 ```
-cd muse-mcp
 cargo build --release
 ```
 
-`target/release/muse.exe`（Windows）または `target/release/muse` が生成される。単体テストは `cargo test`。
+`target/release/muse` が生成される。単体テストは `cargo test`。
+
+## 動作確認（`muse doctor`）
+
+端末を開かずに、どこが壊れているかを層ごとに答える。
+
+```
+muse doctor            認証と状態ファイルだけ（ネットワーク不要）
+muse doctor --live     ゲートウェイまで含めて全部
+muse doctor --live --json
+```
+
+```
+state     ok    6419 bytes at ~/.config/muse-mcp/session.json, mode 0600
+device    ok    present (4657ee48…)
+auth      ok    validated, viewer 1352809671259466
+gateway   ok    ping ok, server_ts_ms 1794743037162
+model     ok    auto/auto (1 available)
+sessions  ok    44 conversations listed
+```
+
+`fail` が1つでもあれば終了コードは 1。`warn` と `skip` は 0 のまま。
+`auth` が通って `gateway` が落ちる状態は「ゲートウェイだけ死んでいる」であり、
+`muse status` だけでは見分けられない。そこを分けるためにこのコマンドがある。
+
+## TUI（`muse tui`）
+
+```
+muse tui                      メイン会話
+muse tui --thread <name>      サブチャット
+muse tui --session <uuid>     セッション ID を直接指定
+```
+
+| キー | 動作 |
+|---|---|
+| Enter | 送信 |
+| Esc / Ctrl+C | 終了 |
+| Tab | 末尾への追従を切り替え |
+| PageUp / PageDown | スクロール |
+| ← → Home End | 入力行のカーソル |
+
+**端末が無ければ起動しない。** `muse tui` は raw mode と alternate screen を
+コンソールに設定する。これらはプロセスの外にある状態なので、復帰せずに死ぬと
+端末が使えなくなる。そのため TTY を確認し、無ければ起動を拒否する。
+パニック時は `ratatui::restore()` を必ず通すフックを入れている。
+
+ただし `TerminateProcess` による強制終了（タスクマネージャの「タスクを終了」、
+`Stop-Process -Force`、`kill -9`）は、プロセス側から捕捉できない。その場合は
+端末を開き直すか `reset` で復旧する。
 
 ## まず読むこと: Windows での文字化けと引用符
 
@@ -462,7 +509,7 @@ Windows と Linux の両方でビルド・実行を実測している。macOS �
 | 項目 | Windows | Linux |
 |---|---|---|
 | ビルド | `cargo build --release` | 同左（Debian 13 / rustc 1.99.1 で実測） |
-| テスト | 92 件 green（Windows） | 92 件 green（Debian 13 / rustc 1.99.1） |
+| テスト | 106 件 green（Windows） | 107 件 green（Debian 13 / rustc 1.99.1、Unix専用1件を含む） |
 | 状態ファイル | `%APPDATA%\muse-mcp\session.json` | `$XDG_CONFIG_HOME/muse-mcp/session.json`、無ければ `$HOME/.config/...` |
 | 状態の権限 | 既定の ACL | 0600（ファイル）と 0700（ディレクトリ） |
 | 保存方式 | 一時ファイル→rename | 同左 |

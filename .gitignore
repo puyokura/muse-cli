@@ -1,12 +1,23 @@
+# Build output
+target/
+
+# Session state must never enter version control
+session.json
+relay-audit.jsonl
+
+# Host-specific MCP registration (absolute local paths)
+.dsh/
+
 # Private app artifact under analysis
 *.apk
+
 # Scratch work and generated analysis
 work/
 analysis/
+
 # Vendored reference tooling and third-party skills
 rea/
 .agents/
-# Host-specific MCP registration (contains absolute local paths)
-.dsh/
+
 # Workspace agent instructions
 AGENTS.md

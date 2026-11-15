@@ -10,6 +10,7 @@
 
 mod cli;
 mod client;
+mod doctor;
 mod http;
 mod mcp;
 mod noise;
@@ -18,6 +19,7 @@ mod sysfs;
 mod thread;
 mod tools;
 mod transport;
+mod tui;
 mod wire;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -96,6 +98,8 @@ async fn run() -> Result<()> {
         "threads" => cmd_threads(&client, &args).await,
         "thread" => cmd_thread(&client, &args).await,
         "chat" | "ask" => cmd_chat(&client, &args).await,
+        "tui" => cmd_tui(&client, &args).await,
+        "doctor" => cmd_doctor(&client, &args).await,
         "relay" => cmd_relay(&client, &args).await,
         "history" => cmd_history(&client, &args).await,
         "cancel" => cmd_cancel(&client, &args).await,
@@ -131,6 +135,8 @@ fn reject_unknown_flags(command: &str, args: &Args) -> Result<()> {
         "threads" => &["all", "json"],
         "thread" => &["confirm", "json"],
         "chat" | "ask" => &["no-wait", "image", "file", "timeout", "json"],
+        "tui" => &[],
+        "doctor" => &["live", "json"],
         "relay" => &[
             "muse-session", "dsh-session", "request-id", "image", "file", "timeout", "poll",
         ],
@@ -179,6 +185,8 @@ CHAT
   muse relay <prompt...>             Send with DSH<->Muse correlation headers
   muse chat --file <path> [...]      Attach a file (stored in the workspace)
   muse chat --image <path> [...]     Attach an image (viewed inline)
+  muse tui [--thread N|--session ID] Terminal UI for reading and writing
+  muse doctor [--live] [--json]     Check state, auth, and the gateway
   muse approvals [list|show|decide]  List or decide agent approvals
   muse ask <prompt...>               Alias of chat
   muse threads [--all]               List primary chat and sub-chats
@@ -594,6 +602,29 @@ fn chat_attachments(args: &Args) -> Result<(Vec<PathBuf>, client::AttachmentKind
         (true, _) => Ok((files, client::AttachmentKind::File)),
         (_, true) => Ok((images, client::AttachmentKind::Image)),
     }
+}
+
+/// Run the health checks and summarise each layer.
+async fn cmd_doctor(client: &Arc<MuseClient>, args: &Args) -> Result<()> {
+    let live = args.has("live");
+    let report = doctor::diagnose(client, live).await?;
+    if args.has("json") {
+        println!("{}", cli::render(&report.to_json()));
+    } else {
+        println!("{}", report.to_text());
+    }
+    if report.failed() {
+        // A non-zero exit is what a script checks; printing the reason above
+        // is for the human. Both are needed.
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// Start the terminal UI on the conversation the caller names.
+async fn cmd_tui(client: &Arc<MuseClient>, args: &Args) -> Result<()> {
+    let (session_id, name) = resolve_thread(client, args).await?;
+    tui::run(client.clone(), name, session_id).await
 }
 
 async fn cmd_chat(client: &Arc<MuseClient>, args: &Args) -> Result<()> {
