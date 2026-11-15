@@ -2,7 +2,7 @@
 name = "muse-cli"
 version = "0.1.0"
 edition = "2021"
-description = "Terminal client and MCP server for Meta Muse (Hatch)"
+description = "Terminal client and MCP server for Muse"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/puyokura/muse-cli"
 readme = "README.md"

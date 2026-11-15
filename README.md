@@ -1,18 +1,16 @@
 # muse-cli
 
-Meta Muse（`com.facebook.aura`、通称 Hatch）を CLI から操作する Rust 製ツール。
-同じバイナリが `muse mcp` で MCP サーバーにもなる。
-
-対象 APK: `com.facebook.aura_14.0.0.4.149-1061901406_minAPI29(arm64-v8a)(nodpi)_apkmirror.com.apk`
+Muse をターミナルから操作する Rust 製ツール。同じバイナリが `muse mcp` で
+MCP サーバーにもなる。
 
 ## ライセンス
 
 AGPL-3.0-or-later。全文は `LICENSE`。
 
-本プロジェクトは Meta Muse（Hatch）アプリの非公開プロトコルを、公開されている
-APK と実通信の観測から再構成した独立実装であり、Meta による配布物ではない。
-依存クレートはいずれも AGPLv3 と互換（MIT / Apache-2.0 / BSD-3-Clause）で、
-内訳は `cargo tree --format "{p} {l}"` で確認できる。
+本プロジェクトは非公開プロトコルを実通信の観測から再構成した独立実装であり、
+Meta による配布物ではない。依存クレートはいずれも AGPLv3 と互換
+（MIT / Apache-2.0 / BSD-3-Clause）で、内訳は
+`cargo tree --format "{p} {l}"` で確認できる。
 
 ## ビルド
 
