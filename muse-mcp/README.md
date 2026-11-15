@@ -339,44 +339,58 @@ dsh への登録は `.dsh/cordis.patch.yml`。
 
 ## DSH との対話（muse-relay）
 
-DSH と Muse を往復させるための専用経路。通常の `/chat/stream` に3つのヘッダを載せて送る。
+DSH と Muse の往復には、両方向とも同じ形式のヘッダを付ける。Muse → DSH 方向は
+dsh-session-api の Muse 窓が付与し、DSH → Muse 方向は **このサーバが付与する**。
+モデルに書かせない。書かせると文面が揺れて機械的に読めなくなる。
 
-| ヘッダ | 意味 |
-|---|---|
-| `museSessionId` | プロンプトを届ける Muse の会話 |
-| `dshSessionId` | 送信元の DSH セッション |
-| `requestId` | この1ターンの相関 ID |
+```
+[muse-relay]
+  museSessionId: <宛先の Muse チャットの ID>
+  dshSessionId: <送信元 dsh セッションの ID>
+  requestId: <相関 ID>
+```
 
-`requestId` はトランスポートが使う `x-request-id` にも流用する。1ターンに1つの ID が、
-ゲートウェイと Muse 側の両方で同じ値になる。
+同じ3値はワイヤ上のヘッダにも載る（`museSessionId` / `dshSessionId` / `requestId`）。
+`requestId` はトランスポートの `x-request-id` にも流用する。
 
 ```
 muse relay "本文" \
-  --muse-session eeb1c4d1-8927-84dd-8037-9a23d2e2b2f0 \
-  --dsh-session ac5f1193-2a35-4be1-9b1c-485620007002 \
-  --request-id lfm3-a1b-v2-layeralloc-20261114-ac5f1193-1
+  --muse-session 002486c1-6c8e-4228-a5f9-35005acf9a17 \
+  --request-id muse-mcp-relay-reverse-20261115-b206576f-1
 ```
 
-同じ値は環境変数 `MUSE_SESSION_ID` / `DSH_SESSION_ID` / `REQUEST_ID` でも渡せる。
-毎ターン同じ DSH セッション ID を書きたくない場合に使う。フラグが優先。
+MCP は `muse_relay(prompt, museSessionId, dshSessionId, requestId, reply_timeout_sec)`。
+引数名はワイヤと同じ camelCase で、`prompt` だけは既存名を変えていない。
 
-MCP では `muse_relay` ツールが同じことをする。
+### サーバが決めること
 
+| 項目 | 扱い |
+|---|---|
+| `museSessionId` | 必須。小文字 UUID でなければ配送しない |
+| `dshSessionId` | 省略時は `DSH_SESSION_ID` から埋める。引数と環境が食い違えば配送しない。両方無ければ配送しない |
+| `requestId` | 渡された値はそのまま使う（Muse 発の依頼への返信）。無ければ `dsh-<uuid>` を生成 |
+
+3項目がそろわない限り配送しない。ヘッダ無しで送る後方互換は無い。
+
+### 本文側の偽装と重複
+
+本文に `[muse-relay]` ブロックが入っていた場合、サーバの解決値と照合する。
+
+- 値が違う → 配送しない（本文とヘッダが矛盾するメッセージは通さない）
+- 項目が欠けている → 配送しない
+- 値が同一 → 本文から取り除き、サーバのブロック1つだけにする
+
+旧来の「DSH セッションから送っています」式の定型文はサーバでは付けない。
+
+### 監査
+
+配送のたびに、状態ファイルと同じディレクトリの `relay-audit.jsonl` へ1行追記する。
+記録するのは `museSessionId` / `dshSessionId` / `requestId` / 配送結果だけ。
+本文は記録しない（監査の範囲を本文全文へ広げない）。
+
+```json
+{"at_ms":1794715148670,"delivered":true,"detail":"7050114c-...","dshSessionId":"b206576f-...","museSessionId":"002486c1-...","requestId":"muse-mcp-relay-reverse-20261115-b206576f-1","tool":"muse relay"}
 ```
-muse_relay(prompt, muse_session_id, dsh_session_id, request_id, reply_timeout_sec)
-```
-
-応答は完了まで待って本文を返す。返り値には相関 ID の組、`sent_message_id`、
-`replied`、`text`、`elapsed_ms` が入る。呼び出し側はこの組を自分の記録に残せる。
-
-ID の検証は送信前に行う。CR・LF・NUL・その他の制御文字を含む値、空の値、
-256文字を超える値は拒否する。ヘッダ分割を狙った入力が届く前に止まる。
-
-`--thread` と `--muse-session` を同時に指定した場合、両者が同じ会話を指すことを確認する。
-食い違えば、ヘッダが別の会話を指したままプロンプトが届くのを避けるため停止する。
-
-`requestId` がゲートウェイの会話履歴には残らないことを実測した。履歴の `chat_events` に
-この文字列は現れない。相関は呼び出し側の記録と、返ってきた `sent_message_id` で取る。
 
 ## プラットフォーム
 
@@ -385,7 +399,7 @@ Windows と Linux の両方でビルド・実行を実測している。macOS �
 | 項目 | Windows | Linux |
 |---|---|---|
 | ビルド | `cargo build --release` | 同左（Debian 13 / rustc 1.99.1 で実測） |
-| テスト | 68 件 green（Windows） | 68 件 green（Debian 13 / rustc 1.99.1） |
+| テスト | 84 件 green（Windows） | 84 件 green（Debian 13 / rustc 1.99.1） |
 | 状態ファイル | `%APPDATA%\muse-mcp\session.json` | `$XDG_CONFIG_HOME/muse-mcp/session.json`、無ければ `$HOME/.config/...` |
 | 状態の権限 | 既定の ACL | 0600（ファイル）と 0700（ディレクトリ） |
 | 保存方式 | 一時ファイル→rename | 同左 |

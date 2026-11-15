@@ -114,14 +114,14 @@ pub fn definitions() -> Vec<Value> {
         }),
         json!({
             "name": "muse_relay",
-            "description": "Send one prompt to Muse with DSH<->Muse correlation headers (museSessionId, dshSessionId, requestId) on the wire and wait for the reply. Use this for agent-to-agent turns so each turn can be matched to the session pair that produced it.",
+            "description": "Send one prompt to Muse on the relay path. The server resolves museSessionId, dshSessionId, and requestId, refuses anything it cannot attribute, and prepends a [muse-relay] block to the body itself, matching the format Muse uses toward DSH; the same three values also go on the wire as headers. Do not write a [muse-relay] block into prompt: a block contradicting the resolved values is an error, and an identical one is stripped. museSessionId is required and must be a lower-case UUID. dshSessionId comes from DSH_SESSION_ID when omitted and is checked against the argument when both exist. requestId is kept verbatim for replies and generated as dsh-<uuid> when absent. Each delivery is recorded in relay-audit.jsonl next to the session state, with the three ids and the outcome but not the body.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
                     "prompt": { "type": "string", "description": "Message to deliver to the Muse agent" },
-                    "muse_session_id": { "type": "string", "description": "Muse conversation the prompt is delivered to; also used as the session_id when set" },
-                    "dsh_session_id": { "type": "string", "description": "DSH session that issued this turn" },
-                    "request_id": { "type": "string", "description": "Correlation id for this single turn" },
+                    "museSessionId": { "type": "string", "description": "Required. The Muse conversation the message is delivered to, as a lower-case UUID. A name or a malformed id is refused before delivery." },
+                    "dshSessionId": { "type": "string", "description": "The sending DSH session. Filled from DSH_SESSION_ID when omitted; a value that disagrees with it is refused." },
+                    "requestId": { "type": "string", "description": "Correlation id. Reply to a Muse-originated request with the requestId you received; omit it and the server generates a unique dsh- id." },
                     "attachments": {
                         "type": "array",
                         "items": { "type": "string" },
@@ -606,27 +606,16 @@ pub async fn call(client: &Arc<MuseClient>, name: &str, args: Value) -> Result<S
         }
         "muse_relay" => {
             let prompt = required_str(&args, "prompt")?;
-            let relay = crate::relay::RelayHeaders {
-                muse_session_id: args
-                    .get("muse_session_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                dsh_session_id: args
-                    .get("dsh_session_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-                request_id: args
-                    .get("request_id")
-                    .and_then(Value::as_str)
-                    .map(str::to_string),
-            };
-            if relay.is_empty() {
-                bail!(
-                    "muse_relay needs at least one of muse_session_id, dsh_session_id, request_id"
-                );
-            }
-            let headers = relay.to_headers()?;
-            let session_id = relay.muse_session_id.clone();
+            // The server owns the header: it resolves the ids, refuses anything
+            // it cannot attribute, and prepends the block itself. Nothing here
+            // trusts the caller or the model to write one.
+            let envelope = crate::relay::RelayEnvelope::resolve(
+                args.get("museSessionId").and_then(Value::as_str),
+                args.get("dshSessionId").and_then(Value::as_str),
+                args.get("requestId").and_then(Value::as_str),
+                &prompt,
+            )?;
+            let headers = envelope.to_headers()?;
             let timeout = args
                 .get("reply_timeout_sec")
                 .and_then(Value::as_u64)
@@ -645,14 +634,33 @@ pub async fn call(client: &Arc<MuseClient>, name: &str, args: Value) -> Result<S
             let started = std::time::Instant::now();
             let outcome = client
                 .ask_and_wait_with_headers(
-                    &prompt,
-                    session_id.as_deref(),
+                    &envelope.body,
+                    Some(&envelope.muse_session_id),
                     &attachments,
                     std::time::Duration::from_secs(timeout.clamp(5, 1800)),
                     std::time::Duration::from_secs(2),
                     &headers,
                 )
-                .await?;
+                .await;
+
+            let (delivered, detail) = match &outcome {
+                Ok(outcome) => (true, outcome.sent_message_id.clone()),
+                Err(err) => (false, Some(err.to_string())),
+            };
+            crate::relay::write_audit(
+                client.state_path(),
+                &json!({
+                    "at_ms": crate::relay::now_ms(),
+                    "tool": "muse_relay",
+                    "museSessionId": envelope.muse_session_id,
+                    "dshSessionId": envelope.dsh_session_id,
+                    "requestId": envelope.request_id,
+                    "delivered": delivered,
+                    "detail": detail,
+                }),
+            );
+
+            let outcome = outcome?;
             let text = outcome
                 .reply
                 .get("display_text")
@@ -660,7 +668,7 @@ pub async fn call(client: &Arc<MuseClient>, name: &str, args: Value) -> Result<S
                 .unwrap_or("")
                 .to_string();
             Ok(pretty(json!({
-                "relay": relay.to_json(),
+                "relay": envelope.to_json(),
                 "session_id": outcome.session_id,
                 "sent_message_id": outcome.sent_message_id,
                 "replied": !text.is_empty(),

@@ -553,15 +553,8 @@ async fn cmd_relay(client: &Arc<MuseClient>, args: &Args) -> Result<()> {
         .ok_or_else(|| anyhow!("muse relay needs a prompt"))?;
 
     let relay = relay_headers(args)?;
-    if relay.is_empty() {
-        bail!(
-            "muse relay needs at least one correlation id: pass --muse-session, \
-             --dsh-session, or --request-id (or set MUSE_SESSION_ID / DSH_SESSION_ID / REQUEST_ID)"
-        );
-    }
-    // A relay turn targets the Muse session named on the header unless the
-    // caller also names a thread; the two must agree, or the header would point
-    // at one conversation while the prompt lands in another.
+    // A named thread and an explicit destination must agree, or the block would
+    // point at one conversation while the prompt lands in another.
     let (thread_session, name) = resolve_thread(client, args).await?;
     if let (Some(header_session), Some(thread_session)) =
         (&relay.muse_session_id, &thread_session)
@@ -572,26 +565,50 @@ async fn cmd_relay(client: &Arc<MuseClient>, args: &Args) -> Result<()> {
             );
         }
     }
-    let session_id = thread_session.or_else(|| relay.muse_session_id.clone());
 
     let images: Vec<PathBuf> = args
         .flag_all("image")
         .into_iter()
         .map(PathBuf::from)
         .collect();
-    let headers = relay.to_headers()?;
+    let envelope = relay::RelayEnvelope::resolve(
+        relay.muse_session_id.as_deref().or(thread_session.as_deref()),
+        relay.dsh_session_id.as_deref(),
+        relay.request_id.as_deref(),
+        &prompt,
+    )?;
+    let headers = envelope.to_headers()?;
     let started = std::time::Instant::now();
 
     let outcome = client
         .ask_and_wait_with_headers(
-            &prompt,
-            session_id.as_deref(),
+            &envelope.body,
+            Some(&envelope.muse_session_id),
             &images,
             reply_timeout(args)?,
             Duration::from_secs(args.flag_u64("poll")?.unwrap_or(2).max(1)),
             &headers,
         )
-        .await?;
+        .await;
+
+    let (delivered, detail) = match &outcome {
+        Ok(outcome) => (true, outcome.sent_message_id.clone()),
+        Err(err) => (false, Some(err.to_string())),
+    };
+    relay::write_audit(
+        client.state_path(),
+        &json!({
+            "at_ms": relay::now_ms(),
+            "tool": "muse relay",
+            "museSessionId": envelope.muse_session_id,
+            "dshSessionId": envelope.dsh_session_id,
+            "requestId": envelope.request_id,
+            "delivered": delivered,
+            "detail": detail,
+        }),
+    );
+
+    let outcome = outcome?;
 
     let text = outcome
         .reply
@@ -602,7 +619,7 @@ async fn cmd_relay(client: &Arc<MuseClient>, args: &Args) -> Result<()> {
     println!(
         "{}",
         cli::render(&json!({
-            "relay": relay.to_json(),
+            "relay": envelope.to_json(),
             "session_id": outcome.session_id,
             "sent_message_id": outcome.sent_message_id,
             "replied": !text.is_empty(),
