@@ -392,6 +392,18 @@ MCP は `muse_relay(prompt, museSessionId, dshSessionId, requestId, reply_timeou
 {"at_ms":1794715148670,"delivered":true,"detail":"7050114c-...","dshSessionId":"b206576f-...","museSessionId":"002486c1-...","requestId":"muse-mcp-relay-reverse-20261115-b206576f-1","tool":"muse relay"}
 ```
 
+## 必須化の範囲
+
+`[muse-relay]` の付与は `muse_relay`（CLI は `muse relay`）に限る。`muse_ask` と
+`muse chat` は通常の会話経路であり、ヘッダは付かない。拡張しない判断は確定済みで、
+これが仕様であって未対応ではない。
+
+- 対象: `muse_relay` / `muse relay`
+- 対象外: `muse_ask` / `muse chat` / `muse ask`
+
+対象外の経路で Muse に届いたメッセージは、どの DSH セッションから出たかを本文から
+機械的に読めない。相互に突き合わせたい場合は `muse_relay` を使う。
+
 ## プラットフォーム
 
 Windows と Linux の両方でビルド・実行を実測している。macOS はソースが同じ経路を通るが未検証。
