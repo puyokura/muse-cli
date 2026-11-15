@@ -401,9 +401,13 @@ impl MuseClient {
                 return Ok(existing);
             }
             // Dead socket: drop it and fall through to a fresh dial.
+            // Resolve the reason before logging: an await inside the macro's
+            // argument list keeps its `Arguments` alive across the await, which
+            // makes the enclosing future non-Send and unspawnable.
+            let reason = existing.closed_reason().await;
             tracing::info!(
                 target: "muse_mcp::noise",
-                reason = ?existing.closed_reason().await,
+                reason = ?reason,
                 "dropping a closed Hatch connection and reconnecting"
             );
             self.connection.lock().await.take();
@@ -524,7 +528,9 @@ impl MuseClient {
         params: Option<Value>,
     ) -> Result<Value> {
         let connection = self.connect().await?;
-        let response = connection.request(method, path, params, 0, RPC_TIMEOUT).await?;
+        let response = connection
+            .request(method, path, params, 0, RPC_TIMEOUT)
+            .await?;
         let response = response.ensure_ok()?;
         if !response.is_json() {
             bail!(
