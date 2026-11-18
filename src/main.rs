@@ -21,6 +21,7 @@ mod sysfs;
 mod thread;
 mod tools;
 mod transport;
+mod usage;
 mod wire;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -110,6 +111,7 @@ async fn run() -> Result<()> {
         "settings" => cmd_settings(&client, &args).await,
         "quota" => cmd_quota(&client, &args).await,
         "slash" => cmd_slash(&client, &args).await,
+        "usage" => cmd_usage(&client, &args).await,
         "raw" => cmd_raw(&client, &args).await,
         "rpc" => cmd_rpc(&client, &args).await,
         "service" => cmd_service(&client, &args).await,
@@ -140,6 +142,7 @@ fn reject_unknown_flags(command: &str, args: &Args) -> Result<()> {
         "doctor" => &["live", "json"],
         "quota" => &["json"],
         "slash" => &["list", "json", "timeout"],
+        "usage" => &["json", "timeout"],
         "relay" => &[
             "muse-session", "dsh-session", "request-id", "image", "file", "timeout", "poll",
         ],
@@ -191,6 +194,7 @@ CHAT
   muse doctor [--live] [--json]     Check state, auth, and the gateway
   muse quota [--json]              Subscription tier, usage %, reset time, top-up
   muse slash [--list] [CMD [args]] Documented /commands: status, compact, clear, usage
+  muse usage [--json]              Exact token counters plus quota fields
   muse approvals [list|show|decide]  List or decide agent approvals
   muse ask <prompt...>               Alias of chat
   muse threads [--all]               List primary chat and sub-chats
@@ -661,6 +665,53 @@ async fn cmd_slash(client: &Arc<MuseClient>, args: &Args) -> Result<()> {
             "reply": text,
         }))
     );
+    Ok(())
+}
+
+/// Exact token counters, read from the `/status` command plus the subscription
+/// payload for the quota fields.
+///
+/// The subscription API exposes only a percentage, so the counters come from the
+/// command the app itself uses. Both sources are reported separately because
+/// they measure different things.
+async fn cmd_usage(client: &Arc<MuseClient>, args: &Args) -> Result<()> {
+    let (session_id, thread) = resolve_thread(client, args).await?;
+    let outcome = client
+        .ask_and_wait(
+            "/status",
+            session_id.as_deref(),
+            &[],
+            client::AttachmentKind::File,
+            reply_timeout(args)?,
+            Duration::from_secs(2),
+        )
+        .await?;
+    let reply = outcome
+        .reply
+        .get("display_text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    if reply.trim().is_empty() {
+        bail!(
+            "/status returned no text; the counters are unavailable, so there is \
+             nothing to report rather than zeroes"
+        );
+    }
+    let status = usage::parse_status(&reply);
+    let quota = {
+        let http = client.http_mut().await;
+        let payload = http
+            .stefi_get("/hatch/subscription?include=agreement,offers")
+            .await?;
+        usage::Quota::from_subscription(&payload)
+    };
+    if args.has("json") {
+        println!("{}", cli::render(&usage::to_json(&status, &quota)));
+    } else {
+        println!("{}", usage::summarize(&status, &quota));
+    }
+    let _ = thread;
     Ok(())
 }
 

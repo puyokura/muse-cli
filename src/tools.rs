@@ -347,6 +347,18 @@ pub fn definitions() -> Vec<Value> {
             "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
         }),
         json!({
+            "name": "muse_usage",
+            "description": "Exact token counters: lifetime and session input/output, subagent split, context used against the window, plus the quota fields. The subscription API only exposes a percentage, so the counters come from the /status command; derived values state their basis.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "session_id": { "type": "string", "description": "Conversation id; defaults to the primary chat" },
+                    "reply_timeout_sec": { "type": "integer" }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
             "name": "muse_slash",
             "description": "Send one of the app's documented slash commands (/status, /compact, /clear, /usage on|off, /stop, /latest, /activity) as a chat turn, or list them with action=list. The gateway interprets the leading /name.",
             "inputSchema": {
@@ -984,6 +996,41 @@ pub async fn call(client: &Arc<MuseClient>, name: &str, args: Value) -> Result<S
                 .await?;
             drop(http);
             Ok(pretty(payload))
+        }
+        "muse_usage" => {
+            let session_id = args.get("session_id").and_then(Value::as_str);
+            let secs = args
+                .get("reply_timeout_sec")
+                .and_then(Value::as_u64)
+                .unwrap_or(180);
+            let outcome = client
+                .ask_and_wait(
+                    "/status",
+                    session_id,
+                    &[],
+                    crate::client::AttachmentKind::File,
+                    std::time::Duration::from_secs(secs),
+                    std::time::Duration::from_secs(2),
+                )
+                .await?;
+            let reply = outcome
+                .reply
+                .get("display_text")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if reply.trim().is_empty() {
+                bail!("/status returned no text; the counters are unavailable");
+            }
+            let status = crate::usage::parse_status(&reply);
+            let quota = {
+                let http = client.http_mut().await;
+                let payload = http
+                    .stefi_get("/hatch/subscription?include=agreement,offers")
+                    .await?;
+                crate::usage::Quota::from_subscription(&payload)
+            };
+            Ok(pretty(crate::usage::to_json(&status, &quota)))
         }
         "muse_slash" => {
             let action = args.get("action").and_then(Value::as_str).unwrap_or("send");
