@@ -342,6 +342,26 @@ pub fn definitions() -> Vec<Value> {
             }
         }),
         json!({
+            "name": "muse_quota",
+            "description": "Report the subscription tier, usage percentage with its denominator, reset time, and top-up balance. The percentage alone is not the answer; this returns the fields that give it meaning.",
+            "inputSchema": { "type": "object", "properties": {}, "additionalProperties": false }
+        }),
+        json!({
+            "name": "muse_slash",
+            "description": "Send one of the app's documented slash commands (/status, /compact, /clear, /usage on|off, /stop, /latest, /activity) as a chat turn, or list them with action=list. The gateway interprets the leading /name.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "action": { "type": "string", "enum": ["send", "list"], "description": "Defaults to send" },
+                    "command": { "type": "string", "description": "Name with or without a leading slash, e.g. /status" },
+                    "args": { "type": "array", "items": { "type": "string" }, "description": "Arguments such as [\"on\"] for /usage" },
+                    "session_id": { "type": "string", "description": "Conversation id; defaults to the primary chat" },
+                    "reply_timeout_sec": { "type": "integer" }
+                },
+                "additionalProperties": false
+            }
+        }),
+        json!({
             "name": "muse_goals",
             "description": "Manage goals: list, get, create, update, delete. create requires title, summary, description. update accepts title/summary/description/status/emoji/momentum. delete needs confirm=true.",
             "inputSchema": {
@@ -956,6 +976,52 @@ pub async fn call(client: &Arc<MuseClient>, name: &str, args: Value) -> Result<S
                 );
             }
             Ok(pretty(client.raw_rpc(&method, &path, params).await?))
+        }
+        "muse_quota" => {
+            let http = client.http_mut().await;
+            let payload = http
+                .stefi_get("/hatch/subscription?include=agreement,offers")
+                .await?;
+            drop(http);
+            Ok(pretty(payload))
+        }
+        "muse_slash" => {
+            let action = args.get("action").and_then(Value::as_str).unwrap_or("send");
+            if action == "list" {
+                return Ok(crate::slash::list_text());
+            }
+            let command = required_str(&args, "command")?;
+            let extra: Vec<String> = args
+                .get("args")
+                .and_then(serde_json::Value::as_array)
+                .map(|rows| {
+                    rows.iter()
+                        .filter_map(|row| row.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let line = crate::slash::build(&command, &extra)?;
+            let session_id = args.get("session_id").and_then(Value::as_str);
+            let secs = args
+                .get("reply_timeout_sec")
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or(180);
+            let outcome = client
+                .ask_and_wait(
+                    &line,
+                    session_id.as_deref(),
+                    &[],
+                    crate::client::AttachmentKind::File,
+                    std::time::Duration::from_secs(secs),
+                    std::time::Duration::from_secs(2),
+                )
+                .await?;
+            Ok(pretty(json!({
+                "sent": line,
+                "session_id": outcome.session_id,
+                "sent_message_id": outcome.sent_message_id,
+                "reply": outcome.reply.get("display_text").cloned().unwrap_or(serde_json::Value::Null),
+            })))
         }
         "muse_goals" => {
             let action = args

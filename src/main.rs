@@ -14,7 +14,9 @@ mod doctor;
 mod http;
 mod mcp;
 mod noise;
+mod quota;
 mod relay;
+mod slash;
 mod sysfs;
 mod thread;
 mod tools;
@@ -106,6 +108,8 @@ async fn run() -> Result<()> {
         "fs" => cmd_fs(&client, &args).await,
         "goals" => cmd_goals(&client, &args).await,
         "settings" => cmd_settings(&client, &args).await,
+        "quota" => cmd_quota(&client, &args).await,
+        "slash" => cmd_slash(&client, &args).await,
         "raw" => cmd_raw(&client, &args).await,
         "rpc" => cmd_rpc(&client, &args).await,
         "service" => cmd_service(&client, &args).await,
@@ -134,6 +138,8 @@ fn reject_unknown_flags(command: &str, args: &Args) -> Result<()> {
         "thread" => &["confirm", "json"],
         "chat" | "ask" => &["no-wait", "image", "file", "timeout", "json"],
         "doctor" => &["live", "json"],
+        "quota" => &["json"],
+        "slash" => &["list", "json", "timeout"],
         "relay" => &[
             "muse-session", "dsh-session", "request-id", "image", "file", "timeout", "poll",
         ],
@@ -183,6 +189,8 @@ CHAT
   muse chat --file <path> [...]      Attach a file (stored in the workspace)
   muse chat --image <path> [...]     Attach an image (viewed inline)
   muse doctor [--live] [--json]     Check state, auth, and the gateway
+  muse quota [--json]              Subscription tier, usage %, reset time, top-up
+  muse slash [--list] [CMD [args]] Documented /commands: status, compact, clear, usage
   muse approvals [list|show|decide]  List or decide agent approvals
   muse ask <prompt...>               Alias of chat
   muse threads [--all]               List primary chat and sub-chats
@@ -598,6 +606,81 @@ fn chat_attachments(args: &Args) -> Result<(Vec<PathBuf>, client::AttachmentKind
         (true, _) => Ok((files, client::AttachmentKind::File)),
         (_, true) => Ok((images, client::AttachmentKind::Image)),
     }
+}
+
+/// Send a documented slash command, or list them.
+///
+/// A slash command is a chat turn whose text starts with `/name`; the gateway
+/// interprets it. Reaching for a private endpoint instead would be guessing at
+/// an API the app does not expose, and a guessed route that happens to 404 would
+/// look like "unsupported" rather than "not investigated".
+async fn cmd_slash(client: &Arc<MuseClient>, args: &Args) -> Result<()> {
+    if args.has("list") || args.positional_opt(1).is_none() {
+        println!("{}", slash::list_text());
+        return Ok(());
+    }
+    let name = args.positional(1, "command")?;
+    let rest: Vec<String> = args.positionals.iter().skip(2).cloned().collect();
+    let line = slash::build(&name, &rest)?;
+    // Warn before sending: an undocumented name is still sent, but the caller
+    // should know the server was asked to interpret something we cannot vouch for.
+    if slash::find(&name).is_none() {
+        eprintln!(
+            "note: `{name}` is not one of the documented commands ({}); sending anyway",
+            slash::COMMANDS
+                .iter()
+                .map(|command| command.name)
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+    }
+    let (session_id, thread) = resolve_thread(client, args).await?;
+    let outcome = client
+        .ask_and_wait(
+            &line,
+            session_id.as_deref(),
+            &[],
+            client::AttachmentKind::File,
+            reply_timeout(args)?,
+            Duration::from_secs(2),
+        )
+        .await?;
+    let text = outcome
+        .reply
+        .get("display_text")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    println!(
+        "{}",
+        cli::render(&json!({
+            "sent": line,
+            "thread": thread,
+            "session_id": outcome.session_id,
+            "sent_message_id": outcome.sent_message_id,
+            "reply": text,
+        }))
+    );
+    Ok(())
+}
+
+/// Read the subscription payload and report the quota with its denominator.
+///
+/// The percentage alone is not the answer: it means nothing without the tier it
+/// is measured against and the moment it resets. `--json` returns the raw
+/// payload so a caller can read fields this summary does not name.
+async fn cmd_quota(client: &Arc<MuseClient>, args: &Args) -> Result<()> {
+    let http = client.http_mut().await;
+    let payload = http
+        .stefi_get("/hatch/subscription?include=agreement,offers")
+        .await?;
+    drop(http);
+    if args.has("json") {
+        println!("{}", cli::render(&payload));
+    } else {
+        println!("{}", quota::summarize(&payload));
+    }
+    Ok(())
 }
 
 /// Run the health checks and summarise each layer.
