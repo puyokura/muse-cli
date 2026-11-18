@@ -126,6 +126,36 @@ catalog         upgrade_eligible=true invite_reward=true cta=Upgrade
 
 MCP は `muse_quota`。
 
+## 使用量の実数（`muse usage`）
+
+クオータの％にはトークン実数の対応が無い。`/hatch/subscription` が返すのは
+`percent_used` だけで、`ViewerUsageJson` のフィールドは `state` /
+`percent_used` / `quota_status` の3つ（APK の DEX で確認）。週次上限も API
+には出てこない。
+
+実数はアプリの `/status` コマンドの応答にだけ存在するので、そこから読む。
+
+```
+$ muse usage
+model           Muse Spark
+lifetime        in 1,127,046,357  out 9,239,512  (account, all sessions)
+session         in 9,020,282  out 6,431  (this conversation)
+subagents       in 0  out 0
+aggregate       in 9,020,282  out 6,431  (session + subagents)
+context         used 72,145 / 350,000  (21%)
+available       277,855  (79%)
+quota           64% of Muse Free  status SUFFICIENT  resets 2026-11-18 23:14:17Z
+topup           80,000,000 / 80,000,000 credits  = 2,000,000,000 / 2,000,000,000 tokens (25x)
+note            the weekly cap is not exposed, so the quota percentage has no token equivalent; ...
+```
+
+`--json` は `counters`（実測）と `quota`（`topup_*_tokens` だけが導出）を
+分けて返し、`derived` に導出項目名を並べる。導出値は根拠を併記する。
+クレジットとトークンの比は 25 倍で、catalog の4パック
+（20M→500M、80M→2B、200M→5B、480M→12B）すべてで一致する。
+
+MCP は `muse_usage`。
+
 ## スラッシュコマンド（`muse slash`）
 
 アプリが文書化しているコマンドを、そのまま1ターンとして送る。
@@ -553,7 +583,7 @@ Windows と Linux の両方でビルド・実行を実測している。macOS �
 | 項目 | Windows | Linux |
 |---|---|---|
 | ビルド | `cargo build --release` | 同左（Debian 13 / rustc 1.99.1 で実測） |
-| テスト | 112 件 green（Windows） | 113 件 green（Debian 13 / rustc 1.99.1、Unix専用1件を含む） |
+| テスト | 123 件 green（Windows） | 124 件 green（Debian 13 / rustc 1.99.1、Unix専用1件を含む） |
 | 状態ファイル | `%APPDATA%\muse-mcp\session.json` | `$XDG_CONFIG_HOME/muse-mcp/session.json`、無ければ `$HOME/.config/...` |
 | 状態の権限 | 既定の ACL | 0600（ファイル）と 0700（ディレクトリ） |
 | 保存方式 | 一時ファイル→rename | 同左 |
