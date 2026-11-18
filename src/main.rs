@@ -19,7 +19,6 @@ mod sysfs;
 mod thread;
 mod tools;
 mod transport;
-mod tui;
 mod wire;
 
 use anyhow::{anyhow, bail, Context, Result};
@@ -98,7 +97,6 @@ async fn run() -> Result<()> {
         "threads" => cmd_threads(&client, &args).await,
         "thread" => cmd_thread(&client, &args).await,
         "chat" | "ask" => cmd_chat(&client, &args).await,
-        "tui" => cmd_tui(&client, &args).await,
         "doctor" => cmd_doctor(&client, &args).await,
         "relay" => cmd_relay(&client, &args).await,
         "history" => cmd_history(&client, &args).await,
@@ -135,7 +133,6 @@ fn reject_unknown_flags(command: &str, args: &Args) -> Result<()> {
         "threads" => &["all", "json"],
         "thread" => &["confirm", "json"],
         "chat" | "ask" => &["no-wait", "image", "file", "timeout", "json"],
-        "tui" => &[],
         "doctor" => &["live", "json"],
         "relay" => &[
             "muse-session", "dsh-session", "request-id", "image", "file", "timeout", "poll",
@@ -185,7 +182,6 @@ CHAT
   muse relay <prompt...>             Send with DSH<->Muse correlation headers
   muse chat --file <path> [...]      Attach a file (stored in the workspace)
   muse chat --image <path> [...]     Attach an image (viewed inline)
-  muse tui [--thread N|--session ID] Terminal UI for reading and writing
   muse doctor [--live] [--json]     Check state, auth, and the gateway
   muse approvals [list|show|decide]  List or decide agent approvals
   muse ask <prompt...>               Alias of chat
@@ -621,11 +617,6 @@ async fn cmd_doctor(client: &Arc<MuseClient>, args: &Args) -> Result<()> {
     Ok(())
 }
 
-/// Start the terminal UI on the conversation the caller names.
-async fn cmd_tui(client: &Arc<MuseClient>, args: &Args) -> Result<()> {
-    let (session_id, name) = resolve_thread(client, args).await?;
-    tui::run(client.clone(), name, session_id).await
-}
 
 async fn cmd_chat(client: &Arc<MuseClient>, args: &Args) -> Result<()> {
     let prompt = args

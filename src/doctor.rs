@@ -1,8 +1,8 @@
 //! Health checks that answer "why is this not working" without a terminal.
 //!
 //! Each check is independent and reports its own result, so a failure names the
-//! layer that broke instead of collapsing into one error. Nothing here opens a
-//! TUI or changes console state.
+//! layer that broke instead of collapsing into one error. Nothing here needs a
+//! terminal or changes console state.
 
 use crate::client::MuseClient;
 use anyhow::Result;

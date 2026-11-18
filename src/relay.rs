@@ -163,6 +163,29 @@ impl RelayEnvelope {
         request_id: Option<&str>,
         body: &str,
     ) -> Result<Self> {
+        let from_env = std::env::var("DSH_SESSION_ID").ok();
+        Self::resolve_with_env(
+            muse_session_id,
+            dsh_session_id,
+            request_id,
+            body,
+            from_env.as_deref(),
+        )
+    }
+
+    /// The same rule with the sending session supplied.
+    ///
+    /// Tests use this so the outcome depends on their own arguments rather than
+    /// on whatever `DSH_SESSION_ID` the test binary happens to inherit. Reading
+    /// the ambient value inside `resolve` made the suite pass or fail depending
+    /// on which session ran it, which is not a property of the code under test.
+    pub fn resolve_with_env(
+        muse_session_id: Option<&str>,
+        dsh_session_id: Option<&str>,
+        request_id: Option<&str>,
+        body: &str,
+        env_dsh_session: Option<&str>,
+    ) -> Result<Self> {
         let muse_session_id = muse_session_id.map(str::trim).unwrap_or_default();
         if muse_session_id.is_empty() {
             bail!("museSessionId is required: a relay turn names the Muse conversation it goes to");
@@ -171,7 +194,7 @@ impl RelayEnvelope {
             bail!("museSessionId must be a lower-case UUID; got `{muse_session_id}`");
         }
 
-        let dsh_session_id = resolve_dsh_session(dsh_session_id)?;
+        let dsh_session_id = resolve_dsh_session_from(dsh_session_id, env_dsh_session)?;
 
         let request_id = match request_id.map(str::trim) {
             Some(value) if !value.is_empty() => {
@@ -239,11 +262,6 @@ pub fn render_block(muse_session_id: &str, dsh_session_id: &str, request_id: &st
 /// The environment value is the session this server was started for. When the
 /// caller also supplies one it has to agree, otherwise the header would claim a
 /// session that is not the sender.
-pub fn resolve_dsh_session(argument: Option<&str>) -> Result<String> {
-    let from_env = std::env::var("DSH_SESSION_ID").ok();
-    resolve_dsh_session_from(argument, from_env.as_deref())
-}
-
 /// The same rule with the environment supplied, so it can be tested without
 /// mutating process-wide state. Environment mutation in tests races against
 /// every other test in the same binary.
@@ -506,7 +524,10 @@ mod tests {
 
 
     fn envelope(muse: &str, dsh: &str, request: Option<&str>, body: &str) -> RelayEnvelope {
-        RelayEnvelope::resolve(Some(muse), Some(dsh), request, body).expect("envelope")
+        // The env argument is the session this test claims to be, so the
+        // assertions never depend on the ambient DSH_SESSION_ID.
+        RelayEnvelope::resolve_with_env(Some(muse), Some(dsh), request, body, Some(dsh))
+            .expect("envelope")
     }
 
     const MUSE_A: &str = "002486c1-6c8e-4228-a5f9-35005acf9a17";
@@ -549,11 +570,11 @@ mod tests {
     // AC-2: no destination or a malformed one is refused.
     #[test]
     fn missing_or_malformed_muse_session_is_refused() {
-        assert!(RelayEnvelope::resolve(None, Some(DSH_A), Some("r"), "x").is_err());
-        assert!(RelayEnvelope::resolve(Some(""), Some(DSH_A), Some("r"), "x").is_err());
-        assert!(RelayEnvelope::resolve(Some("thread-name"), Some(DSH_A), Some("r"), "x").is_err());
-        assert!(RelayEnvelope::resolve(Some("002486C1-6C8E-4228-A5F9-35005ACF9A17"),
-            Some(DSH_A), Some("r"), "x").is_err());
+        assert!(RelayEnvelope::resolve_with_env(None, Some(DSH_A), Some("r"), "x", Some(DSH_A)).is_err());
+        assert!(RelayEnvelope::resolve_with_env(Some(""), Some(DSH_A), Some("r"), "x", Some(DSH_A)).is_err());
+        assert!(RelayEnvelope::resolve_with_env(Some("thread-name"), Some(DSH_A), Some("r"), "x", Some(DSH_A)).is_err());
+        assert!(RelayEnvelope::resolve_with_env(Some("002486C1-6C8E-4228-A5F9-35005ACF9A17"),
+            Some(DSH_A), Some("r"), "x", Some(DSH_A)).is_err());
     }
 
     // AC-3: a dsh session that disagrees with the environment is refused.
@@ -607,14 +628,14 @@ mod tests {
     fn a_contradicting_body_block_is_refused() {
         let body = "[muse-relay]\n  museSessionId: 11111111-1111-4111-8111-111111111111\n  \
                     dshSessionId: b206576f-1f21-45af-b0e4-92166f76a2c7\n  requestId: r\n\n本文";
-        let outcome = RelayEnvelope::resolve(Some(MUSE_A), Some(DSH_A), Some("r"), body);
+        let outcome = RelayEnvelope::resolve_with_env(Some(MUSE_A), Some(DSH_A), Some("r"), body, Some(DSH_A));
         assert!(outcome.is_err(), "contradicting block must not be delivered");
     }
 
     #[test]
     fn an_incomplete_body_block_is_refused() {
         let body = "[muse-relay]\n  requestId: r\n\n本文";
-        assert!(RelayEnvelope::resolve(Some(MUSE_A), Some(DSH_A), Some("r"), body).is_err());
+        assert!(RelayEnvelope::resolve_with_env(Some(MUSE_A), Some(DSH_A), Some("r"), body, Some(DSH_A)).is_err());
     }
 
     // A duplicate of the server's own block is redundant, not contradictory.

@@ -6,7 +6,7 @@ description = "Terminal client and MCP server for Muse"
 license = "AGPL-3.0-or-later"
 repository = "https://github.com/puyokura/muse-cli"
 readme = "README.md"
-keywords = ["muse", "meta", "cli", "mcp", "tui"]
+keywords = ["muse", "meta", "cli", "mcp"]
 categories = ["command-line-utilities"]
 
 [[bin]]
@@ -33,6 +33,3 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 uuid = { version = "1", features = ["v4"] }
-# Terminal UI
-ratatui = "0.29"
-crossterm = "0.28"
