@@ -104,6 +104,54 @@ muse status
 abra トークン（Stefi REST 用）とゲートウェイ資格情報は別物なので、状態ファイルでは
 `abra_token` と `hatch_credential` に分けて保存する。混ぜると REST が 401 になる。
 
+## クオータ（`muse quota`）
+
+`/hatch/subscription` を読んで、使用率を**分母とリセット時刻つきで**出す。
+％だけでは「何の64％か、いつ戻るのか」が分からない。
+
+```
+$ muse quota
+tier            Muse Free (HATCH_FREE)
+subscription    FREE paid=false status=Weekly limit resets on Nov 18
+usage           64% of Free plan  state=METERED status=SUFFICIENT
+resets_at       2026-11-18 23:14:17Z
+topup           80,000,000 / 80,000,000  0% used (2B tokens left)  eligible=false
+catalog         upgrade_eligible=true invite_reward=true cta=Upgrade
+```
+
+`--json` は生のペイロードを返す。`usage.percent_used` が実際の使用率で、
+`usage.quota_status` が `SUFFICIENT` / `DEPLETED`、`usage.resets_at` が
+リセットの Unix 秒。`topup_balance` は追加トークンの残量。
+存在しない項目は `-` で出す（行を消すと「対象外」に見えてしまう）。
+
+MCP は `muse_quota`。
+
+## スラッシュコマンド（`muse slash`）
+
+アプリが文書化しているコマンドを、そのまま1ターンとして送る。
+先頭の `/name` を解釈するのはゲートウェイで、こちらは正しい1行を送るだけ。
+
+```
+muse slash --list
+muse slash /status
+muse slash /usage on
+muse slash /compact --thread <name>
+```
+
+| コマンド | 引数 | 動作 |
+|---|---|---|
+| `/status` | - | セッションの状態（トークン数、コンテキスト使用率） |
+| `/compact` | - | 会話コンテキストを圧縮 |
+| `/clear` | - | 次のメッセージから新しいコンテキスト |
+| `/usage` | `on` \| `off` | 使用量表示の切り替え |
+| `/stop` | - | 進行中の応答を停止 |
+| `/latest` | - | 最新のトランスクリプトへ戻る |
+| `/activity` | - | Activity パネルを開く |
+
+`/usage` は引数が必須。引数なしで送るとサーバが根拠の無い HTTP 400 を返すので、
+送る前に `on|off` を要求する。未登録の名前は警告を出してから送る（黙って別物に
+置き換えない）。MCP は `muse_slash`。
+
 ## セッションを直接指定する（`--session`）
 
 `--thread` は名前から導出したサブチャットを指す。Muse から渡されたセッション ID のように、
@@ -505,7 +553,7 @@ Windows と Linux の両方でビルド・実行を実測している。macOS �
 | 項目 | Windows | Linux |
 |---|---|---|
 | ビルド | `cargo build --release` | 同左（Debian 13 / rustc 1.99.1 で実測） |
-| テスト | 97 件 green（Windows） | 97 件 green（Debian 13 / rustc 1.99.1、Unix専用1件を含む） |
+| テスト | 112 件 green（Windows） | 113 件 green（Debian 13 / rustc 1.99.1、Unix専用1件を含む） |
 | 状態ファイル | `%APPDATA%\muse-mcp\session.json` | `$XDG_CONFIG_HOME/muse-mcp/session.json`、無ければ `$HOME/.config/...` |
 | 状態の権限 | 既定の ACL | 0600（ファイル）と 0700（ディレクトリ） |
 | 保存方式 | 一時ファイル→rename | 同左 |
