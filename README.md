@@ -149,10 +149,21 @@ topup           80,000,000 / 80,000,000 credits  = 2,000,000,000 / 2,000,000,000
 note            the weekly cap is not exposed, so the quota percentage has no token equivalent; ...
 ```
 
-`--json` は `counters`（実測）と `quota`（`topup_*_tokens` だけが導出）を
-分けて返し、`derived` に導出項目名を並べる。導出値は根拠を併記する。
-クレジットとトークンの比は 25 倍で、catalog の4パック
+各グループの下に **クレジット換算**が付く。クレジットは API 自身が使う単位
+（`topup_balance` / `credits_granted`）なので、そのまま比較できる。
+
+```
+lifetime        in 1,124,424,991  out 9,277,061  (account, all sessions)
+  credits       in 44,976,999.64  out 371,082.44
+context         used 83,872 / 350,000  (24%)
+  credits       used 3,354.88 of 14,000.00
+```
+
+換算比は 25 tokens/credit。catalog の4パック
 （20M→500M、80M→2B、200M→5B、480M→12B）すべてで一致する。
+クレジットは**導出値**で、サーバが返した値ではない。測った値と混ぜないため、
+`--json` は `counters`（実測）と `credits`（導出）を分け、`derived` に
+`credits.*` を載せる。
 
 MCP は `muse_usage`。
 

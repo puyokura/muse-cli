@@ -130,6 +130,26 @@ fn grouped(value: i64) -> String {
     crate::quota::format_thousands(value)
 }
 
+/// A token count expressed in credits, to two decimals.
+///
+/// The credit is the unit the API itself uses (`topup_balance`,
+/// `credits_granted`), so a figure in credits is directly comparable with
+/// those. It is derived from tokens, not reported by the server, and the
+/// summary says so.
+pub fn credits_from_tokens(tokens: i64) -> String {
+    let negative = tokens < 0;
+    let absolute = tokens.unsigned_abs();
+    let whole = absolute / TOKENS_PER_CREDIT as u64;
+    // Two decimals is enough to distinguish a single token (1/25 = 0.04).
+    let fraction = ((absolute % TOKENS_PER_CREDIT as u64) * 100) / TOKENS_PER_CREDIT as u64;
+    let formatted = format!("{}.{fraction:02}", crate::quota::format_thousands(whole as i64));
+    if negative {
+        format!("-{formatted}")
+    } else {
+        formatted
+    }
+}
+
 /// Dense summary: one line per group, then the limitation.
 ///
 /// The percentage has no token equivalent, and saying so is part of the answer:
@@ -147,6 +167,11 @@ pub fn summarize(status: &Status, quota: &Quota) -> String {
         total_in.map(grouped).unwrap_or_else(|| "-".into()),
         total_out.map(grouped).unwrap_or_else(|| "-".into())
     ));
+    lines.push(format!(
+        "  credits       in {}  out {}",
+        total_in.map(credits_from_tokens).unwrap_or_else(|| "-".into()),
+        total_out.map(credits_from_tokens).unwrap_or_else(|| "-".into())
+    ));
 
     lines.push(format!(
         "session         in {}  out {}  (this conversation)",
@@ -157,6 +182,17 @@ pub fn summarize(status: &Status, quota: &Quota) -> String {
         status
             .get("session_output_tokens")
             .map(grouped)
+            .unwrap_or_else(|| "-".into())
+    ));
+    lines.push(format!(
+        "  credits       in {}  out {}",
+        status
+            .get("session_input_tokens")
+            .map(credits_from_tokens)
+            .unwrap_or_else(|| "-".into()),
+        status
+            .get("session_output_tokens")
+            .map(credits_from_tokens)
             .unwrap_or_else(|| "-".into())
     ));
 
@@ -184,6 +220,11 @@ pub fn summarize(status: &Status, quota: &Quota) -> String {
         used.map(grouped).unwrap_or_else(|| "-".into()),
         window.map(grouped).unwrap_or_else(|| "-".into()),
         used_pct.map(|p| p.to_string()).unwrap_or_else(|| "-".into())
+    ));
+    lines.push(format!(
+        "  credits       used {} of {}",
+        used.map(credits_from_tokens).unwrap_or_else(|| "-".into()),
+        window.map(credits_from_tokens).unwrap_or_else(|| "-".into())
     ));
 
     let available = status.get("context_available_tokens");
@@ -224,11 +265,11 @@ pub fn summarize(status: &Status, quota: &Quota) -> String {
         _ => lines.push("topup           -".to_string()),
     }
 
-    lines.push(
-        "note            the weekly cap is not exposed, so the quota percentage has \
-         no token equivalent; the counters above are the exact figures"
-            .to_string(),
-    );
+    lines.push(format!(
+        "note            counters are measured; credits are derived at {TOKENS_PER_CREDIT} \
+         tokens/credit (the ratio the catalog packs use). The weekly cap is not \
+         exposed, so the quota percentage has no token or credit equivalent"
+    ));
     lines.join("\n")
 }
 
@@ -259,7 +300,20 @@ pub fn to_json(status: &Status, quota: &Quota) -> Value {
                 .map(|t| t.saturating_mul(TOKENS_PER_CREDIT)),
             "tokens_per_credit": TOKENS_PER_CREDIT,
         },
-        "derived": ["topup_balance_tokens", "topup_total_tokens"],
+        "credits": {
+            "per_credit": TOKENS_PER_CREDIT,
+            "lifetime_input": status.get("total_input_tokens").map(credits_from_tokens),
+            "lifetime_output": status.get("total_output_tokens").map(credits_from_tokens),
+            "session_input": status.get("session_input_tokens").map(credits_from_tokens),
+            "session_output": status.get("session_output_tokens").map(credits_from_tokens),
+            "context_used": status.get("context_used_tokens").map(credits_from_tokens),
+            "context_window": status.get("context_window_tokens").map(credits_from_tokens),
+        },
+        "derived": [
+            "topup_balance_tokens",
+            "topup_total_tokens",
+            "credits.*",
+        ],
         "not_available": "the tier's weekly token cap is not exposed by the API",
     })
 }
@@ -340,7 +394,7 @@ context_available_tokens=277855 context_available_percent=79 usage=on cost=unava
     #[test]
     fn summary_states_that_the_weekly_cap_is_unknown() {
         let text = summarize(&parse_status(REPLY), &quota());
-        assert!(text.contains("no token equivalent"), "{text}");
+        assert!(text.contains("no token or credit equivalent"), "{text}");
     }
 
     #[test]
@@ -353,9 +407,41 @@ context_available_tokens=277855 context_available_percent=79 usage=on cost=unava
             topup_balance: None,
             topup_total: None,
         });
-        assert_eq!(text.lines().count(), 10, "every line stays present: {text}");
+        assert_eq!(text.lines().count(), 13, "every line stays present: {text}");
         assert!(text.contains("lifetime        in -  out -"), "{text}");
         assert!(text.contains("topup           -"), "{text}");
+    }
+
+    #[test]
+    fn credits_are_two_decimal_and_exact_to_one_token() {
+        assert_eq!(credits_from_tokens(0), "0.00");
+        assert_eq!(credits_from_tokens(25), "1.00");
+        assert_eq!(credits_from_tokens(1), "0.04");
+        assert_eq!(credits_from_tokens(1_126_899_520), "45,075,980.80");
+        // Grouping stays even when the whole part crosses a thousand boundary.
+        assert_eq!(credits_from_tokens(25_000), "1,000.00");
+        assert_eq!(credits_from_tokens(-25), "-1.00");
+    }
+
+    #[test]
+    fn summary_shows_credits_beside_every_measured_group() {
+        let text = summarize(&parse_status(REPLY), &quota());
+        // lifetime, session, and context each get a credit line.
+        assert_eq!(text.matches("  credits       ").count(), 3, "{text}");
+        assert!(text.contains("45,075,980.80"), "{text}");
+        assert!(text.contains("2,885.80"), "context used credits: {text}");
+    }
+
+    #[test]
+    fn json_carries_credits_and_marks_them_derived() {
+        let value = to_json(&parse_status(REPLY), &quota());
+        assert_eq!(value["credits"]["per_credit"], 25);
+        assert_eq!(value["credits"]["lifetime_input"], "45,075,980.80");
+        assert!(value["derived"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry.as_str() == Some("credits.*")));
     }
 
     #[test]
