@@ -594,7 +594,7 @@ Windows と Linux の両方でビルド・実行を実測している。macOS �
 | 項目 | Windows | Linux |
 |---|---|---|
 | ビルド | `cargo build --release` | 同左（Debian 13 / rustc 1.99.1 で実測） |
-| テスト | 123 件 green（Windows） | 124 件 green（Debian 13 / rustc 1.99.1、Unix専用1件を含む） |
+| テスト | 126 件 green（Windows） | 124 件 green（Debian 13 / rustc 1.99.1、Unix専用1件を含む） |
 | 状態ファイル | `%APPDATA%\muse-mcp\session.json` | `$XDG_CONFIG_HOME/muse-mcp/session.json`、無ければ `$HOME/.config/...` |
 | 状態の権限 | 既定の ACL | 0600（ファイル）と 0700（ディレクトリ） |
 | 保存方式 | 一時ファイル→rename | 同左 |
